@@ -1,6 +1,6 @@
 # CSV import/export format, schema version 1
 
-Status: normative. The parser (T20) and exporter implement exactly this document. Fixtures live in `tests/fixtures/csv/` (see its `README.md`).
+Status: normative. The parser and exporter (`project_planner.engine.csv_io`) implement exactly this document. Fixtures live in `tests/fixtures/csv/` (see its `README.md`). From Python use `ws.export_csv(...)` and `ws.import_csv(...)` ([api.md](api.md), section "Files and CSV"); decisions behind the format are in [decisions.md](decisions.md) (D2, D7, D10, D11). Import errors raise `ImportFailed` carrying the `Issue`s of section 6.3; engine issue codes are listed in [api.md](api.md).
 
 Source decisions: implementation plan §2 (#2), §2.1 (time units), §2.2 (cost reporting unit), §2.3 (calendar initialisation); functional specification §12.
 
@@ -231,7 +231,7 @@ Encoding: weekday abbreviations joined with `;` (semicolon, no spaces), e.g. `Mo
 
 - The exporter writes tokens in Monday-first order, capitalised as above, regardless of the week-start used by the UI (a Sunday-Thursday week is written `Mon;Tue;Wed;Thu;Sun`). Round trip depends on the set, not on any order.
 - The importer is lenient on case and on spaces around tokens (`mon; TUE`), and does not care about order, but strict on content: only the seven tokens are accepted (no full names, no numbers, no ranges like `Mon-Fri`), a repeated token is an error, and an empty token (`Mon;;Tue`) is an error. All are `CSV_BAD_ENUM` on column `working_weekdays`. A cell that is empty or absent means the default.
-- Delimiter `;` avoids quoting; the cell never contains a comma.
+- Delimiter `;` avoids quoting; the cell never contains a comma. (The Python API `ws.calendar.initialize(working_weekdays=...)` additionally accepts range text such as `"Mon-Fri"`; that form is not valid in CSV.)
 
 ### 4.4 Identifiers
 
@@ -343,7 +343,6 @@ Consequently `export(import(export(p)))` equals `export(p)` byte for byte when `
 ## 9. Worked example
 
 > Note: the example below shows day values unpadded for readability. Per section 4.2 the exporter writes `*_days` columns with exactly 2 decimals (`5.00`), costs with 2 decimals, and `work_qty` / `rate_per_unit` with up to 6 decimals (trailing zeros stripped).
-
 
 The following file is `tests/fixtures/csv/valid_with_results.csv` (shown verbatim). It has two resources, a group with an effort task of 40 h split 80 %/20 %, a milestone, one dependency, and result records for a current dependency-only schedule on an 8 h calendar with `person_days` reporting. Importing it ignores the last six records (RESULT_PROJECT 1, RESULT_NODE 3, RESULT_ASSIGNMENT 2) and reports them in one `CSV_RESULTS_IGNORED` note.
 

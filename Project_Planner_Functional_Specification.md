@@ -1,8 +1,8 @@
 # Project Planner — Functional Specification
 
-Version: 1.3 draft  
+Version: 1.4 draft  
 Date: 2026-10-01  
-Status: Functional scope established; open decisions identified in Section 14. No implementation included.
+Status: Functional scope established. All open decisions resolved on 2026-10-01 (Section 14). No implementation included.
 
 ## 1. Purpose
 
@@ -35,7 +35,9 @@ Saving shall preserve the complete project definition, resource hourly rates, ca
 
 The interface shall indicate whether there are unsaved changes. Loading another project, creating a new project, or importing a replacement CSV shall provide an opportunity to save or discard unsaved work. Failed save or load operations shall leave the current working project intact and show an actionable error.
 
-**Proposed storage workflow:** multiple named projects in SQLite, with New, Save, Save As, and Load actions and a project picker. This workflow is a proposal; explicit save/load capability is agreed.
+**Storage workflow (agreed):**
+- Multiple named projects shall be stored in SQLite, with New, Save, Save As, Load, and Delete actions and a project picker.
+- Save As shall create a new named project from the current working project. The new project then becomes the active one.
 
 ## 4. Work breakdown structure
 
@@ -51,19 +53,30 @@ The WBS shall support nested groups. Users shall be able to add, rename, edit, m
 
 Each node shall have a stable unique ID, a name, a node type, a parent reference, and a sibling order. IDs shall remain stable when names or positions change. The display WBS number may change when the hierarchy changes.
 
-There shall be no imposed task-count limit. This means that the application shall not enforce an arbitrary fixed maximum; it does not imply unlimited memory or instantaneous calculation. Large WBS views shall avoid requiring every row to be rendered at once. Quantitative performance targets remain to be defined.
+There shall be no imposed task-count limit. This means that the application shall not enforce an arbitrary fixed maximum; it does not imply unlimited memory or instantaneous calculation. Large WBS views shall avoid requiring every row to be rendered at once.
+
+Performance targets are measured on representative projects of 1,000, 10,000, and 50,000 tasks:
+- Scheduling a 10,000-task project shall take under 2 seconds.
+- Leveling a 10,000-task project shall take under 30 seconds.
+- Results for the 1,000- and 50,000-task sizes shall be measured and reported.
 
 ### 4.2 Summary information
 
 Group start shall be the earliest scheduled start of its descendants; group finish shall be their latest scheduled finish. Group elapsed span shall not be calculated by adding child durations, because children can overlap. Group effort shall aggregate leaf task effort without counting nested summaries twice.
 
-Whether dependencies can attach to summary groups remains an open decision. Dependencies between tasks and milestones are required.
+Dependencies between tasks and milestones are required. In this version, dependencies shall not attach to summary groups. Attempting to create one shall produce a validation error identifying the group.
 
 ## 5. Task sizing and resource assignments
 
 ### 5.1 Task properties
 
 Each task shall provide a name, stable ID, WBS parent, sizing mode, sizing value and unit, zero or more assignments, and zero or more dependencies. Calculated fields shall include start, finish, working duration, total effort, and relevant validation or overload status.
+
+**Time units.**
+- Task duration, task effort, and dependency offsets shall be entered as a value with a unit of either hours or days. Days are converted to working time using the shared calendar's working hours per day.
+- The entered value and unit are the user's choice. They shall be preserved as entered and shall not be changed by calculation. Effort expressed in days means person-days.
+- Planning calculation outputs (working durations, effort, assignment work, offsets, leveling delays, and project working span) shall be reported in working days, with fractional days permitted. The elapsed calendar span shall be reported in calendar days and labelled distinctly.
+- Cost reporting uses a separate, user-selectable work unit (Section 5.5).
 
 ### 5.2 Duration-based tasks
 
@@ -91,7 +104,7 @@ A task may have multiple assigned people. Each assignment shall have its own use
 
 The scheduler shall not redistribute effort, alter percentages, or assume interchangeable people. The same person shall not be represented twice within one task; editing shall update that person's existing assignment.
 
-The permitted range for an individual assignment percentage remains to be decided. Total resource loading across tasks shall be allowed to exceed 100% and shall remain visible.
+An individual assignment percentage shall be greater than 0% and no greater than a configurable maximum, which defaults to 100%. Total resource loading across tasks shall be allowed to exceed 100% and shall remain visible.
 
 ### 5.5 Resource rates and project cost
 
@@ -107,7 +120,13 @@ For a task with working duration D, each resource r contributes D × its own all
 
 `task_cost = D × sum(allocation_fraction_r × hourly_rate_r)`
 
-The application shall calculate each contribution individually before summing. It shall not divide hours equally among resources or apply an unweighted average rate. Task details shall show each resource’s percentage, assigned hours, hourly rate, and calculated cost so the total can be checked.
+The application shall calculate each contribution individually before summing. It shall not divide hours equally among resources or apply an unweighted average rate. Task details shall show each resource’s percentage, assigned work, rate, and calculated cost so the total can be checked.
+
+Costs shall be calculated in the rate's native unit, from assigned hours and hourly rates. Cost reports shall present assigned work, and the corresponding rate, in a reporting unit chosen by the user: person-hours (man-hours), person-days (man-days), or person-years (man-years).
+- Person-days use the calendar's working hours per day.
+- Person-years use the calendar's working days per year, which the user configures at calendar initialisation (Section 6).
+- The default reporting unit is person-days, set per project. Each report may select a different unit.
+- The reporting unit shall change only how work and rates are presented. It shall not change calculated cost amounts, dates, or the user's entered task units.
 
 Group cost shall sum the costs of descendant leaf tasks without counting summary groups twice. Project cost shall sum all leaf task costs. Milestones shall have zero labor cost.
 
@@ -115,21 +134,51 @@ For an effort-based task, assignment hours shall use the calculated duration and
 
 Delaying a task through leveling shall not change its labor cost when duration, assignments, and rates remain unchanged. Nonworking days and dependency lag shall not themselves incur labor cost. Overlapping assignments shall each contribute their own assigned hours and cost, even when the person is overloaded.
 
-The interface shall display resource rates, assignment hours and costs in task details, task and group costs in the WBS, and total project cost. Rate edits shall invalidate or recalculate affected costs without changing schedule dates. Missing rates shall be flagged; an incomplete estimate shall not be presented as a complete project total. An explicit zero rate shall be valid.
+The interface shall display resource rates, assigned work and costs in task details, task and group costs in the WBS, and total project cost. Rate edits shall invalidate or recalculate affected costs without changing schedule dates. Missing rates shall be flagged; an incomplete estimate shall not be presented as a complete project total. An explicit zero rate shall be valid.
 
-**Proposed convention:** one project currency with no exchange-rate conversion; nonnegative rates; consistent monetary rounding for displayed and exported totals. Currency selection and rounding details remain to be finalized. Rates apply uniformly across each resource's assignments; overtime premiums, date-dependent rates, and task-specific rate overrides are outside this version.
+**Currency and rounding (agreed):**
+- Each project shall have one currency, with a default code of USD, and no exchange-rate conversion. Rates shall be nonnegative.
+- Monetary calculations shall use exact decimal arithmetic at full precision.
+- Displayed and exported amounts shall be rounded to 2 decimals using round-half-to-even. Totals shall be computed from unrounded contributions, not by summing rounded values.
+- Rates apply uniformly across each resource's assignments. Overtime premiums, date-dependent rates, and task-specific rate overrides are outside this version.
 
 ## 6. Shared work calendar
 
 One calendar shall apply to every resource and task. Users shall define recurring working weekdays, working hours per day, holidays, and date exceptions such as an exceptional working day or nonworking day.
 
+**Calendar initialisation.** At the start of a project, the user shall configure the calendar parameters through a single calendar initialisation function. These parameters are project data, not fixed constants. They shall be saved with the project and included in CSV import and export.
+
+| Parameter | Default | Rule |
+|---|---|---|
+| Working hours per day | 8 | Greater than 0 and no more than 24 |
+| Working days per year | 220 | Whole number greater than 0 and no more than 366; used for person-year cost reporting |
+| Working weekdays | Monday–Friday | At least one weekday |
+| Workday start time | 09:00 | Start time plus working hours per day shall not pass midnight. Used to display clock times; the working day is one continuous period. |
+| Holidays | None | Unique dates |
+| Date exceptions | None | Unique dates, each marked working or nonworking |
+
+Initialisation rules:
+- Any parameter the user omits takes its default.
+- All parameters shall be validated together. If any is invalid, none shall be applied, and the error shall identify each invalid parameter.
+
+Calendar parameters may be changed later through calendar editing:
+- A change to working hours per day, weekdays, start time, holidays, or exceptions shall mark the schedule stale. Under Section 5.1, tasks keep their entered value and unit.
+- A change to working days per year affects only person-year cost reporting and shall not mark the schedule stale.
+
 Task work and dependency offsets shall count working time only. Nonworking dates shall contribute no task progress or resource capacity. A continuous task may span a weekend or holiday; these calendar pauses do not constitute task splitting.
 
 The calendar does not require separate daily working intervals, individual resource calendars, or individual leave calendars in this version.
 
-The scheduling engine shall support fractional working days rather than rounding every task to whole days. Under an eight-hour calendar, 12 working hours equal 1.5 working days. Calculation precision and the display convention for partial-day starts and finishes remain to be specified. Calendar calculations shall use a consistent start/finish boundary convention so a finish-to-start successor with zero lag can begin immediately when its predecessor finishes.
+The scheduling engine shall support fractional working days rather than rounding every task to whole days. Under an eight-hour calendar, 12 working hours equal 1.5 working days. Calendar calculations shall use a consistent start/finish boundary convention so a finish-to-start successor with zero lag can begin immediately when its predecessor finishes.
 
-If the selected project start falls on a nonworking day, the proposed behavior is to begin scheduling at the next working boundary and inform the user.
+**Precision and display (agreed):**
+- Working time shall be calculated at one-minute precision.
+- A duration derived from effort shall be rounded up to the next whole working minute.
+- Task intervals run from their start up to, but not including, their finish.
+- Day values shall be calculated exactly and displayed to 2 decimal places.
+- A finish that falls on a day boundary shall be displayed as the end of the last working period (for example, "Monday 17:00"), not as the start of the next working day.
+
+If the selected project start falls on a nonworking day, scheduling shall begin at the next working boundary and the user shall be informed.
 
 ## 7. Dependencies
 
@@ -146,7 +195,7 @@ Positive offsets postpone the applicable successor boundary. Negative offsets al
 
 All incoming constraints shall be satisfied together. The application shall not treat dependency relationships as mandatory equality or start a successor before the project start merely because it has negative lag.
 
-Invalid endpoint references, self-dependencies, and dependency cycles shall produce explicit errors. **Proposed rule:** reject all dependency cycles in this version, even if a particular mathematical cycle might admit a solution. The error shall identify affected nodes.
+Invalid endpoint references, self-dependencies, and dependency cycles shall produce explicit errors. All dependency cycles shall be rejected in this version, even if a particular mathematical cycle might admit a solution. The error shall identify every node in each cycle.
 
 ## 8. Schedule calculation
 
@@ -164,7 +213,9 @@ The result shall include:
 
 The engine shall not report a project completion date as valid if required tasks remain unscheduled. A partial result may be shown, but shall be identified as incomplete.
 
-Changes to calendar, task sizing, dependencies, assignments, or project start shall invalidate affected calculated results. Stale results shall be marked clearly and shall not be represented as current in exports. Whether recalculation happens immediately after valid edits or through a Calculate button is an open interaction decision.
+Changes to calendar, task sizing, dependencies, assignments, or project start shall invalidate affected calculated results. Stale results shall be marked clearly and shall not be represented as current in exports.
+
+Schedule recalculation shall happen only when the user explicitly requests it, through a Calculate action. Until then, edits mark the affected results stale. Rate edits are the exception: they change costs only, so affected costs shall be recalculated immediately, without changing dates.
 
 Fixed dates, deadlines, backward scheduling, and additional date constraints are not established requirements for this version.
 
@@ -178,7 +229,7 @@ Resource loading shall reflect the actual overlapping assignments. It shall not 
 
 Example: two overlapping tasks assigning the same person at 80% and 50% produce 130% loading. The displayed value remains 130%, and the affected interval is flagged.
 
-Users shall be able to inspect each person's loading over time and identify the tasks contributing to an overload. The display shall include a 100% capacity reference. Daily or weekly summaries may be offered, but must distinguish average loading, peak loading, and assigned hours. Nonworking periods shall not be treated as available capacity.
+Users shall be able to inspect each person's loading over time and identify the tasks contributing to an overload. The display shall include a 100% capacity reference. Daily or weekly summaries may be offered, but must distinguish average loading, peak loading, and assigned work (in person-days). Nonworking periods shall not be treated as available capacity.
 
 ## 10. User-requested resource leveling
 
@@ -195,7 +246,16 @@ Delaying a task may require delaying related tasks to preserve FS, SS, FF, or SF
 
 The operation shall report delayed tasks, the added delay, the resulting project finish, and unresolved overloads. If a task's own assignment exceeds a person's permitted capacity, shifting that task cannot resolve the overload; the application shall explain this condition rather than continue indefinitely.
 
-**Proposed interaction:** calculate a leveling preview, then allow Apply or Discard. Also provide a way to return to the dependency-only schedule. Leveling ordering and tie-breaking are explicitly undecided. No optimality or minimum-project-duration guarantee is implied.
+**Interaction (agreed):**
+- Leveling shall first produce a preview, which the user may Apply or Discard.
+- The user shall also be able to return to the dependency-only schedule.
+
+**Ordering (agreed):**
+- Tasks shall be placed one at a time in dependency order.
+- When several tasks are ready, priority goes to the earliest dependency-only start, then WBS display order, then node ID.
+- Each task is placed at the earliest start that respects its dependencies and keeps every assigned person within capacity.
+
+No optimality or minimum-project-duration guarantee is implied.
 
 Edits that invalidate a leveled schedule shall mark it stale. Leveling shall not silently rerun after edits.
 
@@ -231,17 +291,29 @@ Dependencies may be supplied by the import format or entered afterward through t
 
 Export shall include every WBS node, including collapsed or filtered-out items, and the available schedule information. It shall include stable IDs, hierarchy, sizing, assignments, dependencies and offsets, calculated start/finish, duration, effort, resource hourly rates, assignment costs, task/group/project costs, cost completeness status, leveling delay, and schedule status. If scheduling is incomplete or stale, the export shall identify that condition explicitly.
 
-### 12.3 Format definition still required
+### 12.3 Format definition
 
-The precise CSV schema is an open design deliverable. It must accommodate multiple assignments and dependencies per task without ambiguity. A single CSV with a record-type column is a candidate format for project, calendar, resource, WBS, assignment, and dependency records.
+The format shall be a single CSV file with a record-type column, plus a schema version.
+- **Record types:** project, calendar, holiday, calendar exception, resource, WBS node, assignment, and dependency. Export adds result records.
+- **Multiple values per task:** each assignment and each dependency is a separate record, so a task can have several of each without ambiguity.
 
-The agreed reset behavior requires a fresh policy for information omitted from the CSV: either documented defaults or required records. Missing information shall never be taken silently from the previous project. Encoding, units, date format, nested-field representation, and schema version shall be documented in an import template. Identifiers shall be preserved as text so values such as `001` retain their identity.
+Policy for information omitted from the CSV:
+- The project and calendar records are mandatory. Holidays, exceptions, resources, assignments, and dependencies are optional.
+- The calendar record carries the Section 6 initialisation parameters. Omitted calendar parameters, and the optional project settings (currency and cost reporting unit), take their documented defaults. The import summary shall list every default it applied.
+- Missing information shall never be taken silently from the previous project.
+
+The following shall be documented in an import template, which is a design deliverable of implementation:
+- UTF-8 encoding; ISO 8601 dates; a decimal point for decimal values.
+- Time units: each time value has its own unit column, `h` or `d`.
+- Nested-field representation, and the schema version.
+
+Identifiers shall be preserved as text so values such as `001` retain their identity.
 
 ## 13. Acceptance scenarios
 
 | ID | Scenario | Expected behavior |
 |---|---|---|
-| A01 | 40-hour effort task, allocations 80% and 20%, eight-hour days | Five working days; individual efforts 32 and 8 hours |
+| A01 | 40-hour effort task, allocations 80% and 20%, eight-hour days | Five working days; individual efforts 4 and 1 person-days (32 and 8 hours) |
 | A02 | Five-day duration task; allocations change from 50% to 100% | Duration remains five days; effort and loading change |
 | A03 | Same person assigned 80% and 50% to overlapping tasks | 130% shown and overlap flagged |
 | A04 | Working duration crosses a holiday | No work or capacity counted on the holiday; finish moves accordingly |
@@ -264,20 +336,28 @@ The agreed reset behavior requires a fresh policy for information omitted from t
 | A21 | 16-hour duration task; Alice 75% at $100/hour, Bob 25% at $60/hour | Alice contributes 12 hours/$1,200; Bob 4 hours/$240; task total $1,440 |
 | A22 | Launch on a Windows laptop with a standard Python installation, or from the packaged executable | Application window opens without installing Node.js, npm, a browser, or any frontend build step |
 | A23 | Leveling or scheduling a large project | Interface stays responsive, shows progress, and permits cancellation; a cancelled run applies no partial result |
+| A24 | Same task entered as 40 hours and as 5 days, eight-hour days | Identical schedule results, reported in days; each task keeps its entered value and unit |
+| A25 | Cost report unit switched between person-hours, person-days, and person-years | Work and rate shown in the chosen unit; cost amounts and dates unchanged |
+| A26 | Calendar initialised with 7.5 hours per day and 250 working days per year | A 5-day task lasts 37.5 working hours; person-year reporting uses 250 days; settings survive save/load and CSV round-trip |
+| A27 | Calendar initialisation with an invalid parameter combination | Nothing applied; each invalid parameter identified |
 
 ## 14. Open decisions and exclusions
 
-### Decisions to resolve before implementation of the affected feature
+### Decisions resolved on 2026-10-01
 
-1. Leveling priority, tie-breaking, and whether preview/apply and reset are required.
-2. Exact CSV schema and defaults or mandatory records for omitted project settings.
-3. Multiple named project storage and Save As behavior.
-4. Permitted range for an individual resource allocation percentage.
-5. Whether dependencies may reference summary groups.
-6. Immediate versus explicitly requested schedule recalculation.
-7. Partial-day precision, boundary display, and numeric rounding.
-8. Performance targets and representative large-project test sizes.
-9. Project currency and monetary rounding convention.
+| # | Decision | Resolution | Section |
+|---|---|---|---|
+| 1 | Leveling priority, tie-breaking, preview/apply, reset | Placement in dependency order; ties broken by earliest dependency-only start, then WBS order, then ID. Preview with Apply/Discard; reset to the dependency-only schedule. | 10 |
+| 2 | CSV schema and omitted settings | Single record-type CSV. Project and calendar records mandatory; documented defaults for optional settings. The detailed template is an implementation deliverable. | 12.3 |
+| 3 | Named project storage and Save As | Multiple named projects; New, Save, Save As, Load, Delete; project picker. | 3.2 |
+| 4 | Individual allocation range | Greater than 0%, configurable maximum defaulting to 100%. | 5.4 |
+| 5 | Dependencies on summary groups | Not permitted in this version. | 4.2 |
+| 6 | Immediate vs. explicit recalculation | Explicit Calculate action; rate-only edits recalculate costs immediately. | 8 |
+| 7 | Precision, boundary display, rounding, time units | One-minute precision; effort-derived durations rounded up; days displayed to 2 decimals; finish shown as end of working period. Inputs in hours or days, preserved as entered; outputs in days. | 5.1, 6 |
+| 8 | Performance targets and test sizes | 1k / 10k / 50k tasks; schedule 10k under 2 s; level 10k under 30 s. | 4.1 |
+| 9 | Currency and monetary rounding | One currency per project (default USD); exact decimal arithmetic; round-half-to-even to 2 decimals for display and export. | 5.5 |
+| 10 | Cost reporting unit | User-selectable person-hours, person-days, or person-years; default person-days; amounts unchanged by unit. | 5.5 |
+| 11 | Working days per year, hours per day, and similar calendar parameters | User-configurable at project start through calendar initialisation; defaults 220 days/year, 8 hours/day, Mon–Fri, 09:00 start; editable later. | 6 |
 
 ### Outside the initial scope
 

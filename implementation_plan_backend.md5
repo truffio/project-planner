@@ -1,0 +1,665 @@
+# Project Planner — Backend Implementation Plan (sub-agent task list)
+
+Inputs:
+- `Project_Planner_Functional_Specification.md` (v1.3 draft)
+- `proposed_architectures_backend.md5`, §1 (engine) and §8 (desktop variant, Architecture B in-process)
+
+Scope:
+- **In scope:** scheduling logic, persistence, and an application-service API in an installable Python package. The API must work for two clients: a future Tkinter UI, and a user working by hand in a Jupyter notebook.
+- **Out of scope:** Tkinter, any UI code, FastAPI.
+
+Status: plan only. No code yet.
+
+---
+
+## 1. Goals and deliverable shape
+
+### 1.1 Package
+
+- One installable package, `project_planner`, with a `src/` layout and a `pyproject.toml`. It targets Python ≥ 3.11.
+- **Zero runtime dependencies.** The package uses only the standard library: `sqlite3`, `decimal`, `csv`, `concurrent.futures`, `dataclasses`, `hashlib`.
+- Optional extras:
+  - `[notebook]`: `pandas`, for `.to_dataframe()` helpers.
+  - `[dev]`: `pytest`, `pytest-cov`, `hypothesis`, `ruff`, `mypy`, `nbclient`, `ipykernel`.
+
+```
+src/project_planner/
+  __init__.py            # public facade: open_workspace(), types, errors, __version__
+  engine/                # pure logic, no I/O (architecture doc §1.2)
+    model.py  errors.py  config.py  calendar.py  validation.py  sizing.py
+    network.py  forward_pass.py  rollup.py  loading.py  cost.py
+    leveling.py  results.py  fingerprint.py  schedule.py  csv_io.py
+  persistence/           # SQLite schema, migrations, repositories
+    schema.sql  migrations.py  db.py  repositories.py
+  services/              # application services (UI-agnostic)
+    workspace.py  dto.py  events.py  read_models.py  files.py  jobs.py
+  notebook.py            # optional helpers: _repr_html_, to_dataframe (lazy pandas import)
+tests/
+  unit/  acceptance/  property/  services/  csv/  notebook/  perf/  fixtures/
+examples/
+  quickstart.ipynb
+docs/
+  decisions.md  csv_format.md  api.md
+```
+
+This refines the layout in §8.7 of the architecture doc. `planner_engine` becomes `project_planner.engine`, and `app` becomes `project_planner.services` and `project_planner.persistence`. One top-level name makes `pip install -e .` and `import project_planner` work cleanly in notebooks.
+
+### 1.2 Public API usage (target experience; the contract for T35)
+
+```python
+import project_planner as pp
+from datetime import date
+
+ws = pp.open_workspace("plans.db")            # or ":memory:" for a throwaway notebook session
+ws.new_project("Demo", start=date(2026, 10, 5), currency="USD", cost_report_unit="person_days")
+ws.calendar.initialize(                        # calendar initialisation at project start (§2.3); all arguments optional
+    hours_per_day=8,
+    working_days_per_year=220,
+    working_weekdays="Mon-Fri",
+    workday_start="09:00",
+    holidays=[(date(2026, 10, 12), "Holiday")],
+    exceptions=[],
+)
+
+alice = ws.add_resource("Alice", hourly_rate="100")
+bob   = ws.add_resource("Bob",   hourly_rate="50")
+ph1   = ws.add_group("Phase 1")
+t1    = ws.add_task("Design", parent=ph1, effort=pp.hours(40))     # input in hours…
+ws.set_assignment(t1, alice, percent=80)
+ws.set_assignment(t1, bob, percent=20)
+t2    = ws.add_task("Build", parent=ph1, duration=pp.days(2))      # …or in days
+ws.add_dependency(t1, t2, "FS", lag=pp.days(-0.5))                 # "40h", "2d", "-0.5d" strings also accepted
+
+result = ws.schedule()                         # synchronous convenience for notebooks
+result.complete, result.project_finish, result.total_cost
+result.working_span_days                       # outputs are in days: 6.5 here (5 − 0.5 lag + 2)
+result.tasks()                                 # duration_days, effort_days, … ; .to_dataframe() if pandas is installed
+ws.cost_report(unit="person_days")             # or "person_hours" / "person_years"; cost totals identical
+ws.loading(alice)                              # piecewise loading segments + overload flags
+
+preview = ws.level_preview()                   # or ws.submit_leveling_preview() -> Job, for UIs
+ws.apply_leveling()                            # or ws.discard_leveling(), ws.reset_to_dependency_schedule()
+
+ws.save()                                      # ws.save_as("Demo v2"), ws.load(project_id), ws.list_projects()
+ws.export_csv("demo.csv"); ws.import_csv("other.csv")   # import returns a summary, or raises ImportFailed with row/field errors
+```
+
+- Time inputs (duration, effort, lag) are given in **hours or days** (§2.1). Planning outputs are reported in **days**.
+- Every compute operation has a synchronous form (for notebooks and scripts) and a `submit_*()` → `Job` form (for UIs: progress, cancel, non-blocking).
+- All IDs are strings.
+- Money is a `Decimal`. Methods accept money as `str` or `Decimal`, never `float`.
+- Errors are typed exceptions that carry `object_type`, `object_id` and `field`.
+
+---
+
+## 2. Working defaults for open decisions (spec §14)
+
+Implementation cannot wait on every open decision. Each default below is centralized in `engine/config.py` or `docs/decisions.md`, so changing it later is a configuration change, not a refactor. **The user confirmed these defaults on 2026-10-01.** T01 records them as confirmed.
+
+| # | Open decision | Working default |
+|---|---|---|
+| 1 | Leveling priority / tie-break; preview/apply/reset | Serial placement in topological order. Priority: earliest dependency-only start, then WBS display order, then ID. Preview, apply, discard and reset-to-dependency-only are all provided. |
+| 2 | CSV schema / omitted data | Single record-type CSV, defined in T02. `PROJECT` and `CALENDAR` records are mandatory. Holidays and exceptions are optional. No silent defaults from the previous project. |
+| 3 | Named projects / Save As | Multiple named projects in one SQLite file; New / Save / Save As / Load / List / Delete. |
+| 4 | Assignment percent range | Must be greater than 0. The default maximum is 100% (`MAX_ASSIGNMENT_PERCENT`). The maximum is configurable, so the "own allocation exceeds capacity" leveling case (spec §10) can be tested and allowed. |
+| 5 | Dependencies on summary groups | **Rejected** in v1 with a clear validation error. `network` is built so that group endpoints could later be expanded to their leaf tasks. |
+| 6 | Immediate vs. explicit recalculation | Schedule recalculation is **explicit** (`schedule()`). Edits mark results stale. Costs are refreshed automatically when only rates change (spec A18). |
+| 7 | Precision / boundaries / rounding | Internal working-time axis in **integer minutes**. Effort-based durations are rounded **up** to the whole minute. Intervals are half-open, `[start, finish)`. Finish datetimes are shown as end-of-working-period ("17:00 Monday"), not next-day start. **Input/output units are decided by the user; see §2.1.** |
+| 8 | Performance targets | Benchmark sizes of 1k, 10k and 50k tasks. Targets (spec §4.1): schedule 10k tasks in < 2 s; level 10k in < 30 s. The 1k and 50k sizes are measured and reported. |
+| 9 | Currency / rounding | One currency code per project (default `"USD"`). Rates must be nonnegative `Decimal`s. Full precision internally; ROUND_HALF_EVEN to 2 decimals for display/export totals. Totals are computed from unrounded parts. |
+
+### 2.1 Time units (decided by the user, 2026-10-01)
+
+**Inputs.** Task duration, task effort, and dependency lag are each entered as a value plus a unit, either **hours** or **days**.
+
+- The value and unit are stored **exactly as entered**, which spec §5.1 calls the "sizing value and unit".
+- Days convert to working time with the project calendar's hours per day. The conversion happens at calculation time, not at entry.
+- Consequence: if hours/day changes from 8 to 7.5, a task entered as "5 d" becomes 37.5 h, while a task entered as "40 h" stays 40 h. The calendar edit invalidates the schedule as usual.
+- Effort in days means person-days: 1 person-day = one person at 100% for one working day.
+- Fractional values are allowed, such as `1.5 d`, `0.25 d` or `-0.5 d` for a lag.
+- API forms: `pp.hours(x)`, `pp.days(x)`, or strings `"40h"` / `"5d"`. Unit-less numbers are **rejected**, to avoid ambiguity.
+- CSV: separate `*_value` and `*_unit` columns, where the unit is `h` or `d`.
+
+**Outputs.** Planning results are reported in **working days**:
+
+| Quantity | Output field | Unit |
+|---|---|---|
+| Task / milestone / group working duration | `duration_days` | working days |
+| Task / group / project effort | `effort_days` | person-days |
+| Per-assignment work | `assignment_days` | person-days |
+| Dependency lag (echoed) | `lag_days` | working days, with the as-entered value and unit also shown |
+| Project working span | `working_span_days` | working days |
+| Project elapsed span | `elapsed_span_calendar_days` | **calendar** days, labelled distinctly (spec §8) |
+| Leveling delay | `leveling_delay_days` | working days |
+| Loading aggregates | `assigned_days`, `average_percent`, `peak_percent` | person-days / % |
+| Start / finish | `start`, `finish` | calendar datetimes (unchanged) |
+
+Rules for day values:
+
+- Day values are exact `Decimal`s computed as `axis_minutes / minutes_per_day`, and are never rounded inside calculations.
+- Display/export rounding defaults to **2 decimals**, set by `DAYS_DISPLAY_DECIMALS`.
+- Example under an 8 h calendar: 12 h → `1.5`.
+
+**User choice is never altered.** Calculation converts every input to days, or internally to axis minutes. The stored value and unit are never rewritten, by calculation or otherwise. A task entered as `40h` still shows as `40h` in its sizing field, and its calculated `duration_days` is `5`.
+
+### 2.2 Cost reporting unit (decided by the user, 2026-10-01)
+
+**Calculation.** Costs are calculated in the native unit of the rate:
+
+- `assignment_hours = duration_hours × fraction`
+- `cost = assignment_hours × hourly_rate`
+
+This uses full `Decimal` precision and is independent of any reporting choice.
+
+**Reporting.** Cost reports present the work behind each cost, plus the matching rate, in a **user-selected work unit**:
+
+| Unit | Code | Conversion from hours |
+|---|---|---|
+| Person-hours (man-hours) | `person_hours` | × 1 |
+| Person-days (man-days) | `person_days` | ÷ calendar hours per day |
+| Person-years (man-years) | `person_years` | ÷ (hours per day × `working_days_per_year`) |
+
+- **Default unit:** the project setting `cost_report_unit` defaults to `person_days`. Any report can override it, e.g. `ws.cost_report(unit="person_years")` or `ws.task_details(t1, unit="person_hours")`.
+- **Breakdown fields:**
+  - Assignment level: `work_qty` and `work_unit`, `rate_per_unit` (= hourly rate × hours per unit), and `cost`.
+  - Task, group and project level: total `work_qty`, total `cost`, and completeness.
+- **Money is never converted.** The unit changes only the work quantity and the rate shown next to it. Cost totals are identical in every unit.
+- **Rounding:** displayed `work_qty × rate_per_unit` may differ from `cost` in the last cent, because the cost comes from unrounded hours. Reports state that cost is calculated from exact hours.
+- **Person-year definition:** set by the calendar setting `working_days_per_year`, which the user configures through calendar initialisation (§2.3). The default is 220.
+- **Spec §5.5 cost check:** "assigned hours" is satisfied by choosing `person_hours`.
+- **Example (A16):**
+  - `person_hours`: Alice 32 h × $100/h = $3,200.
+  - `person_days`: 4 d × $800/d = $3,200.
+  - `person_years` (220 days): 0.01818… py × $176,000/py = $3,200.
+
+### 2.3 Calendar initialisation (decided by the user, 2026-10-01)
+
+The user configures calendar parameters at the start of a project through one **calendar initialisation function**, `ws.calendar.initialize(...)`. These parameters are **not hard-coded constants**. They are stored per project, persisted with it, and exported in CSV.
+
+| Setting | Default | Validation | Used for |
+|---|---|---|---|
+| `hours_per_day` | 8 | > 0 and ≤ 24, at minute precision | Converting day inputs to working time; reporting in days; person-day cost reporting |
+| `working_days_per_year` | 220 | Integer > 0 and ≤ 366 | Person-year cost reporting |
+| `working_weekdays` | Mon–Fri | At least one weekday | Recurring working pattern |
+| `workday_start` | 09:00 | `workday_start + hours_per_day` ≤ 24:00 | Converting working-time positions to clock times for display ("Monday 17:00"). The working day is one continuous block, as spec §6 requires no separate daily intervals. |
+| `holidays` | none | Dates are unique | Nonworking dates |
+| `exceptions` | none | Dates are unique; each is `working` or `nonworking` | Exceptional working or nonworking days |
+
+Rules:
+
+- **Who calls it and when:**
+  - `new_project()` creates the project with the default calendar.
+  - `calendar.initialize()` is the intended next call. Every argument is optional, and an omitted argument keeps its default.
+  - `initialize()` validates all arguments together. If anything is invalid, it applies nothing and raises `ValidationFailed` with an issue per field.
+  - `pp.CalendarSettings(...)` can also be passed as `new_project(..., calendar=...)`, to create and initialise in one step.
+- **Changes after initialisation:**
+  - Individual edit methods (`set_hours_per_day`, `add_holiday`, `add_exception`, …) are allowed later through calendar editing (spec §11.3).
+  - Changes that affect scheduling (`hours_per_day`, `working_weekdays`, `workday_start`, `holidays`, `exceptions`) mark the schedule stale. Per §2.1, tasks entered in days keep their day value, and tasks entered in hours keep their hour value.
+  - Changing `working_days_per_year` affects only how person-years are reported. It marks nothing stale.
+- **Other project settings** (`currency`, `cost_report_unit`) are given to `new_project()` and editable through project settings. Each has a documented default.
+- **Config is not calendar.** Application-level limits stay in `engine/config.py`: `MAX_ASSIGNMENT_PERCENT` and `DAYS_DISPLAY_DECIMALS`. They are not part of a project's calendar.
+
+---
+
+## 3. Interface contracts (frozen in T10, before parallel work)
+
+Parallel agents must agree on these names. T10 publishes them as real code. Afterwards, any change needs a note in `docs/api.md` and a message to the orchestrator.
+
+- **`engine.model`**: frozen dataclasses.
+  - `Project(…, currency, cost_report_unit, calendar)`.
+  - `Calendar(working_weekdays, hours_per_day, working_days_per_year, workday_start, holidays, exceptions)`, with the defaults and validation from §2.3.
+  - `CalendarSettings` is the public input type for initialisation.
+  - `TimeQty(value: Decimal, unit ∈ {hours, days})`, with `to_minutes(minutes_per_day) -> int`.
+  - `WbsNode(id, name, kind ∈ {group, task, milestone}, parent_id, order, sizing_mode ∈ {duration, effort, none}, sizing: TimeQty | None)`.
+  - `Resource(id, name, hourly_rate: Decimal | None)`.
+  - `Assignment(task_id, resource_id, percent: Decimal)`.
+  - `Dependency(id, pred_id, succ_id, type ∈ {FS, SS, FF, SF}, lag: TimeQty)`.
+- **`engine.errors`**: `Issue(severity, code, message, object_type, object_id, field)`.
+  - Exceptions: `ValidationFailed(issues)`, `ImportFailed(issues)`, `NotFound`, `Conflict`, `Cancelled`.
+- **`engine.calendar.WorkingAxis`**:
+  - `to_axis(dt) -> int`
+  - `to_datetime(minute, boundary: "start" | "finish") -> datetime`
+  - `first_working_minute(date) -> int`
+  - `nonworking_ranges(dt_from, dt_to)`
+  - `minutes_per_day`
+- **`engine.schedule`**:
+  - `schedule(project, config) -> ScheduleResult`
+  - `level(project, base: ScheduleResult, config, progress=None, cancel=None) -> LevelingResult`
+- **`engine.results`**:
+  - `ScheduleResult(node_results, assignment_results, loading, issues, complete, project_start, project_finish, working_span_days, elapsed_span_calendar_days, cost_total, cost_complete, schedule_fp, cost_fp, kind ∈ {dependency_only, leveling_preview, leveled})`
+  - `LevelingResult(result, delays_days: {task_id: Decimal}, unresolved: [Overload], finish_delta_days)`
+  - All output quantities follow the §2.1 table. Results also keep the internal axis minutes in `*_minutes` fields, for the engine, persistence and tests. Those fields are not part of the user-facing display contract.
+- **`engine.fingerprint`**: `schedule_fp(project) -> str`, `cost_fp(project) -> str`. Both are SHA-256 hashes of canonical JSON.
+- **`services.workspace.Workspace`**: the facade from §1.2.
+- **`services.jobs.Job`**: `status`, `progress: float`, `message`, `cancel()`, `result(timeout)`, `done()`.
+
+---
+
+## 4. Orchestration rules for sub-agents
+
+1. Each agent reads the spec, `proposed_architectures_backend.md5` §1 and §8, and this plan before starting.
+2. **File ownership:** an agent creates or edits only the files listed under its task's *Owns*. It may read anything. If it needs a change in a file owned by another task, it reports that rather than editing the file.
+3. Tasks in the same wave run in parallel. Agents in a wave that touch shared configuration (e.g. `pyproject.toml`) must not do so. Only T00 owns it.
+4. **Tests ship with the code:** each implementation task includes its unit tests, and is done only when `pytest <its tests>`, `ruff check`, and `mypy --strict` on its files pass.
+5. **Test-first for acceptance:** T05 writes the acceptance tests before implementation, marked `xfail(strict=True)`. Each implementation task removes the `xfail` marks for the scenarios it makes pass.
+6. Agent type: `general-purpose` for implementation and test tasks. A fresh `general-purpose` agent with no implementation history for review tasks (T50, T51). Parallel waves can use `isolation: worktree` and be merged by the orchestrator after each wave.
+7. **Final report from every agent:** files changed, tests added, test command output summary, deviations from contracts, open questions.
+
+---
+
+## 5. Task list
+
+The legend for the "Tests" line is the test types each task must deliver.
+
+### Wave 0 — Foundations (T00, T01, T02, T05 run in parallel)
+
+**T00 — Repository scaffolding and tooling**
+- Owns: `pyproject.toml`, `src/project_planner/__init__.py` (stub), every package `__init__.py`, `tests/conftest.py`, `.gitignore`, `ruff`/`mypy`/`pytest` config, `README.md` (skeleton).
+- Work:
+  - `src` layout and extras from §1.1.
+  - Pytest markers: `unit`, `acceptance`, `property`, `services`, `csv`, `notebook`, `perf`, `slow`.
+  - Default run excludes `perf` and `notebook`.
+  - Coverage configuration; Hypothesis profiles (`dev`, `ci`).
+  - A `tests/fixtures/builders.py` *placeholder*, which T10 fills in.
+- Done when: `pip install -e .[dev]` works; `pytest` runs (zero tests OK); `ruff` and `mypy` pass on the empty package.
+- Tests: tooling smoke test (`import project_planner`; version present).
+
+**T01 — Decision record**
+- Owns: `docs/decisions.md`.
+- Work:
+  - Record each default from §2 with the spec reference, the rationale, and the config constant name.
+  - Record §2, §2.1 (time units) and §2.2 (cost reporting unit) as **confirmed by the user, 2026-10-01**.
+  - Record §2.3: calendar parameters are user-configurable through calendar initialisation, with defaults of 8 h/day and 220 working days/year.
+- Done when: every §14 item is covered; the orchestrator confirms the defaults with the user.
+- Tests: none (documentation).
+
+**T02 — CSV format specification**
+- Owns: `docs/csv_format.md`, `tests/fixtures/csv/*.csv` (valid and invalid samples).
+- Work: define the single record-type CSV format.
+  - Columns: `record_type`, `schema_version`, plus typed fields per record type (`PROJECT`, `CALENDAR`, `HOLIDAY`, `EXCEPTION`, `RESOURCE`, `NODE`, `ASSIGNMENT`, `DEPENDENCY`), and export-only result fields (`RESULT_NODE`, `RESULT_ASSIGNMENT`, `RESULT_PROJECT`).
+  - Encoding UTF-8 with an optional BOM; ISO 8601 dates; percent values; decimal point `.`; IDs as text.
+  - Time inputs per §2.1 as `sizing_value` + `sizing_unit` and `lag_value` + `lag_unit`, where the unit is `h` or `d` and is mandatory.
+  - Export result columns are in days (`duration_days`, `effort_days`, `assignment_days`, `leveling_delay_days`, …).
+  - Cost columns are `work_qty`, `work_unit`, `rate_per_unit` and `cost`, in the project's `cost_report_unit` (§2.2).
+  - `PROJECT` records include `currency` and `cost_report_unit`.
+  - `CALENDAR` records include every §2.3 setting: `hours_per_day`, `working_days_per_year`, `working_weekdays`, `workday_start`.
+  - Each omitted setting takes the documented §2.3 default and is listed in the import summary.
+  - Mandatory records and the rules for omitted data.
+  - What export writes, how stale or incomplete results are marked, and that imported result rows are ignored on import.
+  - Sample files: one valid file per scenario (A10, A12) and invalid ones (bad reference, cycle, duplicate assignment, bad date, missing PROJECT, unknown schema version) (A09).
+- Done when: the spec covers §12 fully; samples exist; T20 can implement it without guessing.
+- Tests: none directly (the fixtures are used by T20/T33).
+
+**T05 — Acceptance test suite (test-first)**
+- Owns: `tests/acceptance/test_a01_…_a23.py`, `tests/acceptance/conftest.py`.
+- Work:
+  - Encode A01–A21 and A23–A27 (A22 is UI/launch and out of scope here; note that in the file) as tests against the **public facade** from §1.2, using exact expected values from the spec, expressed in the §2.1 output units. Examples:
+    - A01: `duration_days = 5`, `assignment_days = 4` and `1`; in `person_hours`, `work_qty = 32` and `8`.
+    - A16: $3,200 / $400 / $3,600 in every cost report unit (hours, days, years).
+    - A21: a 16 h task gives `duration_days = 2`; Alice `assignment_days = 1.5` (12 h, $1,200), Bob `0.5` (4 h, $240); total $1,440.
+  - Add **unit tests for entry**:
+    - the same task entered as `40h` and `5d` gives identical results on an 8 h calendar;
+    - after hours/day changes to 7.5, `5d` gives `duration_days = 5` while `40h` gives `duration_days = 5.333…`;
+    - unit-less input is rejected;
+    - after `schedule()`, every task's stored sizing value and unit are unchanged.
+  - Add **cost-report unit tests**:
+    - the A16 and A21 breakdowns in `person_hours`, `person_days` and `person_years` show the expected `work_qty` and `rate_per_unit`, with identical costs;
+    - changing `cost_report_unit` changes neither dates nor cost, and does not mark anything stale.
+  - Add **calendar initialisation tests**:
+    - `initialize()` with no arguments gives the §2.3 defaults;
+    - `hours_per_day = 7.5` makes a `5d` task 37.5 h, while `working_days_per_year = 250` changes only person-year values;
+    - an invalid combination, such as `workday_start = 20:00` with 8 h, applies nothing and reports every bad field;
+    - settings survive save, load and CSV round-trip.
+  - Add derived scenarios for A04, A05 and A06 with hand-computed expected dates: every dependency type with positive and negative lag, a holiday crossing, and multiple predecessors.
+  - Mark all tests `xfail(strict=True)` with the implementing task ID in the reason.
+- Done when: all scenarios are present; expected values are hand-verified in comments; the suite runs (all xfail).
+- Tests: this task *is* tests.
+
+### Wave 1 — Engine core
+
+**T10 — Domain model, errors, config, test builders** (must finish before T11–T20 start)
+- Owns: `engine/model.py`, `engine/errors.py`, `engine/config.py`, `tests/fixtures/builders.py`, `tests/unit/test_model.py`.
+- Work:
+  - The frozen dataclasses and enums from §3, with structural invariants: one assignment per (task, resource), milestone has zero sizing, group has no sizing.
+  - `TimeQty` (§2.1) with `hours()` / `days()` constructors and a parser for `"40h"` / `"5d"` / `"-0.5d"` that rejects unit-less input.
+  - `to_minutes(minutes_per_day)` with rounding up, and a `minutes_to_days(minutes, minutes_per_day) -> Decimal` helper.
+  - `Config` holding the defaults from §2, including `DAYS_DISPLAY_DECIMALS`.
+  - Project settings `currency` and `cost_report_unit` (`WorkUnit` enum: `person_hours`, `person_days`, `person_years`).
+  - `Calendar` / `CalendarSettings` with the §2.3 fields, defaults and cross-field validation (`workday_start + hours_per_day` ≤ 24:00).
+  - A fluent test builder, e.g. `ProjectBuilder().calendar(...).task("A", effort=40).assign("A", "alice", 80)…build()`, for use by every other test.
+- Done when: the contracts from §3 compile, are type-checked, and are documented with docstrings.
+- Tests:
+  - unit: constructors, invariants, equality/hashing, builder;
+  - `TimeQty` parsing (valid, invalid, negative, fractional) and conversion at 8 h and 7.5 h per day;
+  - property: `minutes_to_days(to_minutes(days(x)))` == x when x × minutes_per_day is whole.
+
+**T11 — Calendar and working-time axis** (parallel after T10)
+- Owns: `engine/calendar.py`, `tests/unit/test_calendar.py`, `tests/property/test_calendar_props.py`.
+- Work:
+  - Build `WorkingAxis` from working weekdays, hours/day, holidays, and working/nonworking exceptions.
+  - Conversions in both directions, applying the boundary convention.
+  - Clock times come from the user-configured `workday_start` and `hours_per_day` (§2.3). Nothing is hard-coded.
+  - Project start on a nonworking day moves to the next working boundary and produces an info `Issue`.
+  - Efficient lookups via a cumulative day index and bisect, extending lazily for long projects.
+  - `nonworking_ranges`.
+  - Validation for a calendar with no working days.
+- Done when: an FS successor with zero lag starts exactly at the predecessor finish; 12 h = 1.5 days on an 8 h calendar.
+- Tests:
+  - unit: weekend, holiday, exceptional working Saturday, nonworking weekday, year boundary, start on a holiday;
+  - non-default calendars: 7.5 h days starting 08:30, a Sun–Thu working week, a 6-day week;
+  - property: `to_axis(to_datetime(m, "start")) == m`; monotonicity; minutes per working day are constant.
+  - Unblocks A04.
+
+**T12 — Validation and cycle detection** (parallel after T10)
+- Owns: `engine/validation.py`, `engine/network.py`, `tests/unit/test_validation.py`, `tests/unit/test_network.py`.
+- Work:
+  - Checks: dangling references, self-dependency, group endpoints (rejected per decision 5), duplicate dependency, percent range, negative effort or duration, WBS parent cycles, orphans.
+  - Missing rate is a *cost* warning, not a schedule error.
+  - Tarjan SCC lists every node in each cycle.
+  - Topological order with a deterministic tie-break.
+  - All issues carry an object, ID and field.
+- Done when: every rule has a positive and negative test; cycle errors name all members (A14).
+- Tests: unit; property (a random DAG is never flagged, and adding a back edge always is).
+
+**T13 — Sizing** (parallel after T10)
+- Owns: `engine/sizing.py`, `tests/unit/test_sizing.py`.
+- Work:
+  - Convert the as-entered `TimeQty` to axis minutes with the calendar's minutes per day (§2.1). Effort in days is person-days.
+  - Duration mode: D is fixed and effort = D × Σa.
+  - Effort mode: D = ceil(E / Σa) in minutes, with Σa computed exactly in `Decimal`.
+  - Σa ≤ 0 makes the task unschedulable, with a reason.
+  - Milestones are D = 0.
+- Done when: A01, A02 and A13 pass at engine level.
+- Tests:
+  - unit: exact-division and rounding cases; hours vs. days entry; 7.5 h-per-day calendar;
+  - property: effort-mode D × Σa ≥ E, and the difference is less than one minute × Σa.
+
+**T14 — Cost** (parallel after T10)
+- Owns: `engine/cost.py`, `tests/unit/test_cost.py`.
+- Work:
+  - Per assignment: hours = D × a, cost = hours × rate, in `Decimal`. Task cost is the sum.
+  - Calculate in hours (§2.2).
+  - Provide a pure `cost_report(result, unit, hours_per_day, working_days_per_year)` that converts the work quantity and rate per unit for display. Money values are never changed.
+  - Completeness: a missing rate gives "incomplete" with the resource listed. An explicit 0 is valid.
+  - Milestones cost 0.
+  - The rounding helper for display/export.
+- Done when: A16, A20 and A21 pass at engine level.
+- Tests: unit; property (task cost = D × Σ(aᵢ × rateᵢ) exactly; leveling-independent).
+
+**T15 — Forward pass** (after T11 and T12)
+- Owns: `engine/forward_pass.py`, `tests/unit/test_forward_pass.py`, `tests/property/test_forward_pass_props.py`.
+- Work:
+  - Convert lag from its as-entered `TimeQty` (hours or days, signed) to axis minutes.
+  - In topological order: `start = max(0, FS: pf+lag, SS: ps+lag, FF: pf+lag−D, SF: ps+lag−D)`, then `finish = start + D`.
+  - Optional per-task minimum-start delays (used by leveling).
+  - A node whose own sizing or predecessors are unschedulable is marked blocked, with a reason chain; the result is incomplete.
+- Done when: A05 and A06 pass, including every type with positive and negative lag, and negative lag clamped at project start.
+- Tests:
+  - unit: each type × {+lag, 0, −lag}, multiple predecessors, milestones, blocked propagation;
+  - property: every dependency constraint holds for every scheduled pair; no start < 0; result is deterministic.
+
+**T16 — Rollup** (parallel with T15; needs only node results)
+- Owns: `engine/rollup.py`, `tests/unit/test_rollup.py`.
+- Work:
+  - Group start/finish as min/max over scheduled descendants.
+  - Effort and cost sum over leaf tasks only.
+  - Groups with unscheduled descendants are flagged incomplete.
+  - Display WBS numbering ("1.2.3") from parent and order.
+- Done when: A17 passes at engine level.
+- Tests: unit (nested groups, empty groups, overlapping children); property (group total = sum of leaves, regardless of nesting).
+
+**T17 — Resource loading** (parallel with T15)
+- Owns: `engine/loading.py`, `tests/unit/test_loading.py`, `tests/property/test_loading_props.py`.
+- Work:
+  - Per-resource sweep-line producing piecewise-constant segments `(start, end, percent, task_ids)`, uncapped.
+  - Overload segments above 100%.
+  - Daily/weekly aggregation giving average %, peak %, and assigned person-days (§2.1). Aggregation is on axis days, so nonworking time is never counted as capacity.
+- Done when: A03 passes (130% shown with both tasks listed).
+- Tests: unit (touching intervals at `[a,b)` boundaries do not overlap; zero-length milestones are ignored); property (∫segments = Σ assignment minutes; peak ≥ average).
+
+**T18 — Leveling** (after T15 and T17)
+- Owns: `engine/leveling.py`, `tests/unit/test_leveling.py`, `tests/property/test_leveling_props.py`.
+- Work:
+  - Serial placement per decision 1. For each task, find the earliest feasible start ≥ its dependency-earliest start, where feasible means every assigned resource stays ≤ 100% over `[s, s+D)` against the placed load.
+  - Candidate starts are the dependency-earliest start plus the load-segment end points, so the search terminates.
+  - A task whose own percent for a resource exceeds 100% is placed at its dependency-earliest start and reported as unresolvable.
+  - Output: delays per task, unresolved overloads, finish delta.
+  - Takes a progress callback and a cancel token (checked per task).
+- Done when: A07, A08 and A19 pass at engine level.
+- Tests:
+  - unit: simple two-task conflict, chain push-through, SF/FF successors, self-overload explanation, weekend inside a delayed task, cancellation;
+  - property, on random small projects:
+    - all dependencies hold;
+    - durations, assignments and percents are unchanged;
+    - cost is unchanged;
+    - no resource exceeds 100% except reported unresolved cases;
+    - every task's start is ≥ its dependency-only start;
+    - the algorithm terminates.
+
+**T19 — Results assembly, fingerprints, orchestration** (after T13–T18)
+- Owns: `engine/results.py`, `engine/fingerprint.py`, `engine/schedule.py`, `tests/unit/test_schedule.py`, `tests/unit/test_fingerprint.py`.
+- Work:
+  - `schedule()`: validate → sizing → forward pass → rollup → loading → cost → result.
+  - `level()`: wraps T18 and runs the same assembly.
+  - Calendar datetimes for every node; project finish only if the result is complete.
+  - Working span in working days vs. elapsed span in calendar days.
+  - All output quantities converted to days per §2.1, keeping internal `*_minutes` fields.
+  - Canonical-JSON fingerprints: a rate change alters `cost_fp` only, never `schedule_fp`.
+  - `recost(result, project)` for rate-only refresh.
+- Done when: the engine-level acceptance scenarios A01–A08, A13, A14, A16, A17 and A19–A21 pass when run through `engine.schedule` by an engine-level shim of the T05 tests.
+- Tests:
+  - unit: complete vs. incomplete result; stale detection with fingerprints; recost leaves dates untouched (A18);
+  - output units: every day field equals `minutes / minutes_per_day` exactly;
+  - an elapsed span that crosses a weekend is larger than the working span.
+
+**T20 — CSV import/export (engine side)** (after T10 and T12; needs T02)
+- Owns: `engine/csv_io.py`, `tests/csv/test_csv_io.py`.
+- Work:
+  - `parse(text_stream) -> Project | raises ImportFailed(issues with row/column)`. Parses the whole file before returning; checks schema version; IDs stay text.
+  - `export(project, result | None, stale_flags) -> text`. Writes every node regardless of UI state, plus the result rows and an explicit stale/incomplete status.
+  - No file I/O.
+- Done when: all T02 fixtures behave as documented.
+- Tests:
+  - csv: every invalid fixture gives the expected row/field issue;
+  - round-trip `parse(export(p))` == `p` for the definition;
+  - IDs like `001` are preserved;
+  - Hypothesis round-trip on generated projects.
+
+### Wave 2 — Persistence and services
+
+**T30 — SQLite schema, migrations, repositories** (after T10; parallel with Wave 1 engine work)
+- Owns: `persistence/*`, `tests/services/test_persistence.py`.
+- Work:
+  - Normalized schema per architecture doc §3.2. Project `kind ∈ {saved, workspace}`; `schedule_runs` (kind, fingerprints, created_at); `node_results`, `assignment_results`, `loading_segments`, `issues`.
+  - Foreign keys on; `UNIQUE(task_id, resource_id)`; WAL mode; `PRAGMA user_version` migrations.
+  - Repositories load and store a whole `engine.model.Project` and its results in bulk (no N+1 queries).
+  - Transactional copy of a project (for save / save-as / load).
+  - `Decimal` stored as TEXT; IDs stored as TEXT.
+  - Time inputs stored as value + unit, exactly as entered (§2.1).
+- Done when: round-trip store/load of a project and result is lossless, including leveling delays and Decimal precision.
+- Tests:
+  - services: round-trip; constraint violations surface as `Conflict`;
+  - an exception injected mid-transaction leaves the DB unchanged;
+  - migration from an empty DB;
+  - `:memory:` support.
+
+**T31 — Workspace edit service** (after T30 and T19)
+- Owns: `services/workspace.py` (edit and state parts), `services/dto.py`, `services/events.py`, `tests/services/test_workspace_edits.py`.
+- Work:
+  - All edit operations from §1.2: nodes (add, rename, move, reorder), sizing, assignments (setting one updates the existing pair), dependencies, calendar, resources, project settings.
+  - `calendar.initialize(...)` (§2.3) validates everything first and applies all of it in one transaction.
+  - Calendar edits update staleness per §2.3: a scheduling-relevant change marks the schedule stale; a `working_days_per_year` change does not.
+  - Stable ID generation.
+  - Two-step delete: `delete_preview(ids) -> DeletePreview(token, descendants, dependencies)`, then `delete_commit(token)`; it raises `Conflict` if the workspace revision changed in between.
+  - Each edit is one transaction and bumps the revision.
+  - `state()` returns dirty, `stale_dates`, `stale_costs`, `has_preview`.
+  - An event callback interface (no threading assumptions).
+  - Rate edits trigger an automatic `recost` (decision 6).
+- Done when: A15 and A18 pass at service level.
+- Tests: services (every edit operation; dirty and stale transitions; delete preview/commit/conflict; rate edit changes cost only).
+
+**T32 — Compute service and jobs** (after T31)
+- Owns: `services/jobs.py`, and the compute parts of `services/workspace.py` (coordinate with T31 through a separate module, `services/compute.py`, which `workspace.py` delegates to).
+- Work:
+  - `schedule()` / `level_preview()` (synchronous), plus `submit_schedule()` / `submit_leveling_preview()` → `Job`.
+  - `ProcessPoolExecutor`, with an inline-executor option for notebooks and tests.
+  - Progress through a queue; cancellation.
+  - A project snapshot is taken at submit time. A result whose fingerprint no longer matches the workspace is stored but marked stale on arrival.
+  - `apply_leveling` / `discard_leveling` / `reset_to_dependency_schedule`.
+  - Leveling never runs automatically.
+  - `freeze_support` note in the docs.
+- Done when: A07, A11 (leveling part), A15 and A23 (backend part) pass.
+- Tests: services (sync vs. async give identical results; cancellation applies nothing; an edit during a job produces a stale result; preview/apply/discard/reset state machine; worker exception surfaces as a typed error).
+
+**T33 — Project files: save / load / new / import / export** (after T31; parallel with T32)
+- Owns: `services/files.py`, `tests/services/test_files.py`.
+- Work:
+  - Save, save-as, load, list, delete named projects, and new.
+  - Load restores the definition and stored results verbatim, with no recalculation.
+  - Every operation that replaces the working project refuses to discard unsaved work unless the caller passes `discard_unsaved=True`; otherwise it raises `UnsavedChanges`. This lets a UI prompt the user.
+  - Import: parse fully first (T20), then replace the workspace in one transaction, and return a replacement summary.
+  - Export: includes stale/incomplete markers.
+- Done when: A09, A10, A11 and A12 pass at service level.
+- Tests:
+  - services: failed import or load leaves the workspace byte-identical (compare fingerprint and revision);
+  - save → reopen DB → load restores results and leveling delays exactly;
+  - an unsaved-changes guard on each replacing operation;
+  - export of a stale result is marked stale.
+
+**T34 — Read models (UI/notebook queries)** (after T31; parallel with T32 and T33)
+- Owns: `services/read_models.py`, `tests/services/test_read_models.py`.
+- Work, per architecture doc §8.5:
+  - `wbs_rows(parent_id, expanded_ids, offset, limit)` with display numbers, sizing as entered (value + unit), `duration_days`, `effort_days`, dates, cost and status;
+  - `gantt_rows(row_window, time_window)`;
+  - `loading(resource_id, time_window, granularity ∈ {segments, day, week})`;
+  - `task_details(id, unit=None)` with per-assignment %, `assignment_days`, and `work_qty` / `rate_per_unit` / `cost` in the chosen or project cost report unit (§2.2);
+  - `cost_report(scope=project | group_id | task_id, unit=None)`;
+  - `nonworking_ranges(time_window)`;
+  - `project_summary()`.
+  - Plain DTOs only.
+- Done when: windowed queries on a 10k-task project return in < 50 ms (measured in T42).
+- Tests: services (windowing correctness, collapsed groups excluded from rows but present in export, cost breakdown matches A16/A21).
+
+**T35 — Public facade and notebook ergonomics** (after T31–T34)
+- Owns: `src/project_planner/__init__.py` (exports), `notebook.py`, `docs/api.md`, `tests/unit/test_public_api.py`.
+- Work:
+  - `open_workspace(path | ":memory:")`. The API accepts objects or IDs interchangeably.
+  - Export `CalendarSettings`. `ws.calendar.initialize()` has documented keyword arguments, and a readable `ws.calendar` repr shows the current settings.
+  - Export `hours()` / `days()`. Every time parameter accepts `TimeQty` or a `"40h"` / `"5d"` string, and rejects bare numbers with a message showing both forms.
+  - Readable `__repr__`, plus `_repr_html_` tables for results, loading and task details.
+  - `.to_records()` everywhere; `.to_dataframe()` when pandas is installed, with a clear error naming `pip install project_planner[notebook]` when it is not.
+  - Type hints throughout.
+  - `__all__` defines the supported public surface; everything else is internal.
+- Done when: the §1.2 example runs verbatim; all T05 acceptance tests pass with their `xfail` removed.
+- Tests: unit (public names exist; repr/html smoke; pandas-absent path via monkeypatch).
+
+### Wave 3 — Hardening, examples, review
+
+**T40 — Acceptance suite green**
+- Owns: `tests/acceptance/*` (marks only, no logic changes).
+- Work: remove all remaining `xfail` marks. Any failure goes back to the owning task.
+- Done when: A01–A21 and A23–A27 pass; A22 is documented as out of scope for this backend phase.
+- Tests: acceptance.
+
+**T41 — Cross-module property and integration tests**
+- Owns: `tests/property/test_end_to_end_props.py`, `tests/fixtures/generators.py`.
+- Work:
+  - A Hypothesis strategy for random valid projects (calendars, nested WBS, mixed sizing, 0–N assignments, random DAG dependencies with all four types and signed lags).
+  - End-to-end invariants:
+    - dependencies hold;
+    - leveled cost equals unleveled cost;
+    - group sums equal leaf sums;
+    - `export → import → schedule` gives the same dates as the original;
+    - save → load gives an identical result;
+    - fingerprint stability.
+- Done when: it runs under the `ci` profile in < 2 minutes.
+- Tests: property.
+
+**T42 — Performance benchmarks**
+- Owns: `tests/perf/*`, `tools/generate_large_project.py`.
+- Work: generate 1k, 10k and 50k task projects with realistic structure. Time schedule, level, save, load, CSV export/import, and windowed reads, and check against the spec §4.1 targets (decision 8).
+- Done when: a report table is produced in `docs/performance.md`. Hotspots are reported to the orchestrator; no optimization is done in this task.
+- Tests: perf (`-m perf`, excluded by default).
+
+**T43 — Example notebook and notebook test**
+- Owns: `examples/quickstart.ipynb`, `tests/notebook/test_quickstart.py`.
+- Work:
+  - The notebook walks through: create a project, build the calendar, add resources and WBS, assign, add dependencies, schedule, inspect cost and loading (A16 numbers), create an overload, preview and apply leveling, save, load, export CSV, import CSV.
+  - The test runs the notebook with `nbclient` and checks that it executes without errors and that key output cells contain the expected totals.
+- Done when: `pytest -m notebook` passes from a clean `pip install -e .[dev,notebook]`.
+- Tests: notebook.
+
+**T44 — Documentation**
+- Owns: `README.md` (content), `docs/api.md` (finalize with T35), `docs/csv_format.md` (finalize with T20).
+- Work: installation, quickstart, API reference by module, error model, the sync vs. job usage pattern for UI integrators (including Tkinter `after()` polling guidance and `freeze_support`), decisions summary.
+- Done when: a fresh agent can follow the README to run the quickstart without reading the source.
+- Tests: none; T43 covers executable docs.
+
+**T50 — Spec-conformance review** (fresh agent)
+- Owns: `docs/review_spec_conformance.md`.
+- Work: walk the spec section by section and map each "shall" to code and tests. List gaps, deviations and untested requirements.
+- Done when: every "shall" in §3–§12 is mapped or listed as a gap.
+
+**T51 — Code review** (fresh agent; run `/code-review` at high effort on the full diff)
+- Owns: `docs/review_code.md`.
+- Work: correctness, determinism, Decimal/float leaks, transaction boundaries, process-pool pickling, public API consistency.
+- Done when: findings are triaged; fixes are assigned back to the owning tasks.
+
+---
+
+## 6. Dependency graph and waves
+
+```
+Wave 0:  T00 ─┬─ T01   T02   T05        (parallel; T00 first if worktrees are not used)
+              │
+Wave 1:      T10 ──┬── T11 ──┐
+                   ├── T12 ──┼── T15 ──┬── T18 ──┐
+                   ├── T13   │   T16   │         ├── T19
+                   ├── T14   │   T17 ──┘         │
+                   ├── T20 (needs T02, T12)      │
+                   └── T30 (persistence, parallel with engine)
+Wave 2:      T31 (needs T19, T30) ──┬── T32
+                                    ├── T33
+                                    └── T34 ──── T35
+Wave 3:      T40   T41   T42   T43   T44   (parallel)  ──►  T50, T51  ──► fix loop
+```
+
+Maximum parallelism:
+- Wave 1 has 6 concurrent agents after T10: T11, T12, T13, T14, T20 and T30. Then T15/T16/T17 run, then T18, then T19.
+- Wave 2 has 3 concurrent agents after T31.
+- Wave 3 has 5 concurrent agents.
+
+---
+
+## 7. Testing strategy summary
+
+| Layer | Location | Technique | Gate |
+|---|---|---|---|
+| Unit | `tests/unit` | pytest, builders from T10 | Each task; ≥ 90% line and branch coverage on `engine/` |
+| Property | `tests/property` | Hypothesis (`dev` fast, `ci` thorough) | Module invariants (T11–T18) + end-to-end (T41) |
+| Acceptance | `tests/acceptance` | Spec scenarios through the public API, written test-first (T05) | All of A01–A21 and A23–A27 green (T40) |
+| Services / integration | `tests/services` | Real SQLite (temp file and `:memory:`), fault injection for rollback | Workspace, files, jobs, read models; ≥ 85% coverage on `services/` and `persistence/` |
+| CSV | `tests/csv` | Fixture files from T02, round-trip properties | Every documented error code exercised |
+| Notebook | `tests/notebook` | `nbclient` execution of `examples/quickstart.ipynb` | Runs clean; key values asserted |
+| Performance | `tests/perf` | Generated 1k/10k/50k projects, timed | 10k-task schedule < 2 s and level < 30 s (spec §4.1); misses are reported as defects for triage |
+| Static | — | `ruff`, `mypy --strict` | Zero errors on `src/` |
+
+Commands:
+- `pytest` (default: unit + property[dev] + acceptance + services + csv)
+- `pytest -m notebook`
+- `pytest -m perf`
+- `pytest --hypothesis-profile=ci`
+
+---
+
+## 8. Definition of done (whole backend phase)
+
+- `pip install -e .` works with zero runtime dependencies. `import project_planner` exposes the §1.2 API.
+- All acceptance scenarios in scope pass: A01–A21, A23 (backend part), and A24–A27.
+- Property, services, CSV and notebook suites pass; coverage gates are met; `ruff` and `mypy --strict` are clean.
+- `docs/decisions.md` has been confirmed by the user, with any overrides applied.
+- Calendar parameters, including hours per day and working days per year, are set by the user through calendar initialisation (§2.3). None are hard-coded.
+- Time inputs accept hours or days and are never altered. All planning outputs are in days (§2.1). Cost reports show work in the user's choice of person-hours, person-days or person-years (§2.2).
+- The performance report exists.
+- Spec-conformance and code-review findings are resolved, or explicitly deferred with the user's agreement.
+- No module under `engine/` imports `sqlite3`, `services`, `persistence`, or any UI library. This is enforced by a test that inspects imports.

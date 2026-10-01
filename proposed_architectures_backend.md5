@@ -36,6 +36,7 @@ The calendar is shared by every task and resource (§6), so the engine can map c
 - **Weekends and holidays disappear from scheduling math.** They come back only when converting axis positions to calendar datetimes for output (A04, A08).
 - **Integer units avoid float drift.** Fractional days (1.5 days = 720 min on an 8 h calendar) stay exact. Effort / sum(fractions) is the only division, and it is rounded once with a documented rule.
 - **Resource capacity is uniform per axis unit**, because there are no per-resource calendars. Leveling and loading therefore also work purely on the axis.
+- **Units at the edges:** users enter durations, effort and lags in hours or days. The value and unit are stored as entered, and days are converted with the calendar's hours/day at calculation time. Results are reported in working days, computed exactly as `minutes / minutes_per_day`. Hours appear only in cost breakdowns. See spec §5.1 and the implementation plan §2.1.
 - **Boundary convention:** tasks occupy half-open intervals `[start, finish)`. An FS successor with zero lag starts at exactly `pred.finish` (§6). One axis instant at a day boundary maps to two calendar readings ("end of Mon" = "start of Tue"). The output layer picks one display convention (open decision 7) without affecting the math.
 
 ### 1.2 Engine modules
@@ -43,7 +44,7 @@ The calendar is shared by every task and resource (§6), so the engine can map c
 | Module | Responsibility |
 |---|---|
 | `model` | Immutable dataclasses: `Project`, `Calendar`, `WbsNode` (group/task/milestone), `Resource`, `Assignment`, `Dependency`. Stable string IDs, so `"001"` is preserved (§12.3). |
-| `calendar` | Builds the working-time axis from weekdays, hours/day, holidays, and exceptions. Provides `to_axis(datetime)`, `to_datetime(axis, boundary=start/finish)`, and the next-working-boundary rule for a nonworking project start (§6). |
+| `calendar` | Builds the working-time axis from the user-configured calendar: weekdays, hours/day, workday start, working days/year, holidays, and exceptions. These are set through calendar initialisation at project start (spec §6). Provides `to_axis(datetime)`, `to_datetime(axis, boundary=start/finish)`, and the next-working-boundary rule for a nonworking project start (§6). |
 | `validation` | Structural checks with object/field-addressed errors: dangling refs, self-dependencies, duplicate person per task, ranges, missing rates. Cycle detection uses Tarjan SCC and reports every node in each cycle (§7, A14). |
 | `sizing` | Duration-based: `D` given, `effort = D × Σa`. Effort-based: `D = E / Σa`. If Σa ≤ 0, the task is unschedulable with a reason (A01, A02, A13). |
 | `network` | Dependency graph and topological order. Prepared for group endpoints if open decision 5 allows them, by expanding them to their leaf descendants. |

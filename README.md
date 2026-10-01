@@ -1,170 +1,340 @@
 # Project Planner
 
-Project Planner backend: a scheduling engine (dependencies, working calendar, resource loading, cost, resource leveling), SQLite persistence with named projects and CSV import/export, and a Python API (`import project_planner as pp`) that a desktop UI or a Jupyter notebook can drive directly. There is no server and no UI in this package.
+A locally run project-planning tool in the spirit of the planning side of Microsoft Project. You describe a work breakdown structure (WBS), task durations or effort, dependencies, people with hourly rates, and one shared work calendar. Project Planner then calculates:
 
-## Requirements
+- start and finish dates for every task;
+- the project completion date;
+- how loaded each person is over time, flagging overloads;
+- labour cost per assignment, task, group and project.
 
-- Python 3.11 or newer.
-- No runtime dependencies (standard library and `sqlite3` only).
-- Optional: `pandas`, via the `notebook` extra, for `.to_dataframe()`.
+It can also level resources on request, by delaying whole tasks.
+
+This repository currently holds the **backend**: the scheduling engine, SQLite storage and a Python API. The API can be driven directly from a Jupyter notebook or a script, and it is the layer the desktop UI will be built on.
+
+## Project status
+
+| Part | Status |
+|---|---|
+| Functional specification (v1.4) | Agreed — [`Project_Planner_Functional_Specification.md`](Project_Planner_Functional_Specification.md) |
+| Backend: engine, persistence, Python API | Complete; all 26 in-scope acceptance scenarios pass |
+| Spec-conformance and code reviews | Done; high-priority findings fixed ([reviews](#documentation)) |
+| Desktop UI (Tkinter) | Not started |
+
+## What it does
+
+- **Tasks sized your way.** Enter a duration or a total effort, in hours or days (`"40h"`, `"5d"`). Each task keeps exactly what you entered, and every calculated result is reported in working days.
+- **Multiple people per task.** Each person has their own allocation percentage. Effort-based tasks derive their duration from the combined allocation.
+- **Four dependency types.** FS, SS, FF and SF, each with a positive or negative lag counted in working time.
+- **One shared calendar.** Working weekdays, hours per day, workday start time, working days per year, holidays and exception days.
+- **Honest resource loading.** 130 % is shown as 130 %, never capped or averaged away.
+- **Cost estimates.** Each person contributes their own hours at their own rate. Reports can show work in person-hours, person-days or person-years. A missing rate is flagged, never guessed.
+- **Leveling on request.** Preview, then apply or discard. Leveling only delays whole tasks, and it never changes durations, assignments or cost.
+- **Named projects in one SQLite file.** Save, save as, load and delete, with an unsaved-changes guard. Loading restores saved results exactly.
+- **CSV import and export.** Import replaces the whole project and is fully validated first, so a bad file changes nothing.
+- **Change tracking.** Edits never recalculate on their own. The workspace knows when the dates or the costs are out of date.
+
+## Repository tour
+
+```
+Project_Planner_Functional_Specification.md   what the product must do (authoritative)
+proposed_architectures_backend.md5            architecture options and the chosen design
+implementation_plan_backend.md5               task plan used to build the backend (incl. test strategy)
+src/project_planner/
+  __init__.py      public API: import project_planner as pp
+  engine/          pure scheduling logic: calendar, validation, sizing, forward pass,
+                   leveling, loading, cost, results, CSV (no database, no UI)
+  persistence/     SQLite schema, migrations, repositories
+  services/        the Workspace: editing, calculation, background jobs, files, read views
+  notebook.py      HTML display and DataFrame helpers for Jupyter
+tests/             unit, acceptance (spec scenarios A01–A27), property, services, csv,
+                   notebook, perf
+examples/          quickstart.ipynb — a runnable tour
+docs/              API reference, CSV format, decisions, performance, reviews
+tools/             generate_large_project.py — synthetic projects for benchmarks
+```
 
 ## Installation
 
-```bash
+You need Python 3.11 or newer. The package has no runtime dependencies beyond the standard library.
+
+```powershell
+git clone <repo-url> project
+cd project
 python -m venv .venv
-.venv\Scripts\python -m pip install --upgrade pip
-.venv\Scripts\python -m pip install -e ".[dev]"      # development: pytest, hypothesis, ruff, mypy, nbclient, ipykernel
+.venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
-On Linux or macOS use `.venv/bin/python`. To use the package without the development tools, run `pip install -e .`; add `".[notebook]"` for pandas.
+On Linux or macOS, use `.venv/bin/python` instead of `.venv\Scripts\python`. The `dev` extra installs the test and lint tools. To get pandas DataFrames in notebooks as well, install `".[dev,notebook]"`.
 
-## Quickstart
+## Using the project planner
+
+Everything goes through a **workspace**. A workspace is either an SQLite file holding your saved projects, or `":memory:"` for a throwaway session. The workspace always has one working project open.
+
+### 1. A first schedule
 
 ```python
-import tempfile
 from datetime import date
-from pathlib import Path
-
 import project_planner as pp
 
-ws = pp.open_workspace(":memory:")             # or a file path such as "plans.db"
-ws.new_project("Demo", start=date(2026, 10, 5), currency="USD", cost_report_unit="person_days")
-ws.calendar.initialize(                        # all arguments optional
-    hours_per_day=8,
-    working_days_per_year=220,
-    working_weekdays="Mon-Fri",
-    workday_start="09:00",
-    holidays=[(date(2026, 10, 12), "Holiday")],
-)
+ws = pp.open_workspace(":memory:")
+ws.new_project("Website relaunch", start=date(2026, 10, 5))     # a Monday
 
-alice = ws.add_resource("Alice", hourly_rate="100")   # money: str or Decimal, never float
-bob = ws.add_resource("Bob", hourly_rate="50")
-phase1 = ws.add_group("Phase 1")
-design = ws.add_task("Design", parent=phase1, effort=pp.hours(40))   # input in hours...
-ws.set_assignment(design, alice, percent=80)
-ws.set_assignment(design, bob, percent=20)
-build = ws.add_task("Build", parent=phase1, duration=pp.days(2))     # ...or in days
-ws.add_dependency(design, build, "FS", lag=pp.days(-0.5))            # "40h", "2d", "-0.5d" also work
+design = ws.add_task("Design", duration="3d")
+build = ws.add_task("Build", duration="5d")
+launch = ws.add_milestone("Launch")
+ws.add_dependency(design, build, "FS")
+ws.add_dependency(build, launch, "FS")
 
-result = ws.schedule()                          # synchronous; edits never recalculate by themselves
-print(result.complete, result.project_finish, result.total_cost)     # True 2026-10-14 13:00:00 3600.0
-print(result.working_span_days)                                      # 6.5 (outputs are in days)
+result = ws.schedule()
 for row in result.tasks():
-    print(row.node_id, row.start, row.finish, row.duration_days, row.effort_days, row.cost)
+    print(f"{row.node_id:3} {row.start:%a %d %b %H:%M} -> {row.finish:%a %d %b %H:%M}  {row.duration_days} d")
+print("Finish:", result.project_finish)
+```
+```text
+t1  Mon 05 Oct 09:00 -> Wed 07 Oct 17:00  3 d
+t2  Thu 08 Oct 09:00 -> Wed 14 Oct 17:00  5 d
+m1  Wed 14 Oct 17:00 -> Wed 14 Oct 17:00  0 d
+Finish: 2026-10-14 17:00:00
+```
 
-print(ws.cost_report(unit="person_hours").total_cost)  # cost totals are identical in every unit
-print(ws.loading(alice).segments[0].percent)            # piecewise loading with overload flags
+Weekends are skipped automatically. A task that ends at the close of a day is shown finishing at 17:00 that day, not at 09:00 the next morning.
 
-# Resource leveling: preview, then apply (or discard / reset).
-review = ws.add_task("Review", parent=phase1, duration=pp.days(3))
-ws.set_assignment(review, alice, percent=60)            # overlaps Design: Alice is at 140 %
+### 2. People, effort and cost
+
+```python
+from datetime import date
+import project_planner as pp
+
+ws = pp.open_workspace(":memory:")
+ws.new_project("Costing", start=date(2026, 10, 5))
+alice = ws.add_resource("Alice", hourly_rate="100")
+bob = ws.add_resource("Bob", hourly_rate="50")
+
+# Effort-based task: 40 person-hours shared 80 % / 20 % -> lasts 5 working days
+spec = ws.add_task("Write spec", effort="40h")
+ws.set_assignment(spec, alice, percent=80)
+ws.set_assignment(spec, bob, percent=20)
+
+result = ws.schedule()
+print(result.node(spec).duration_days, "days,", result.total_cost)
+
+for unit in ("person_hours", "person_days"):
+    for a in ws.cost_report(unit=unit).node(spec).assignments:
+        print(f"  {a.resource_id}: {a.work_qty} {a.work_unit} x {a.rate_per_unit} = {a.cost}")
+```
+```text
+5 days, 3600.0
+  r1: 32.0 person_hours x 100 = 3200.0
+  r2: 8.0 person_hours x 50 = 400.0
+  r1: 4.0 person_days x 800 = 3200.0
+  r2: 1.0 person_days x 400 = 400.0
+```
+
+The reporting unit changes only how work and rates are shown. The money is identical in every unit. Money and rates are passed as strings or `Decimal` and are never floats.
+
+### 3. Your working calendar
+
+```python
+from datetime import date
+import project_planner as pp
+
+ws = pp.open_workspace(":memory:")
+ws.new_project("Calendar demo", start=date(2026, 10, 5))
+ws.calendar.initialize(                       # every argument is optional
+    hours_per_day="7.5",
+    working_days_per_year=225,                # used for person-year cost reports
+    working_weekdays="Mon-Fri",
+    workday_start="08:30",
+    holidays=[(date(2026, 10, 8), "Founders' day")],
+)
+t = ws.add_task("Audit", duration="4d")
+row = ws.schedule().node(t)
+print(row.start, "->", row.finish)            # Mon, Tue, Wed, (holiday), Fri
+print(ws.node(t).sizing)                      # what you entered is kept
+```
+```text
+2026-10-05 08:30:00 -> 2026-10-09 16:00:00
+4d
+```
+
+### 4. Overloads and leveling
+
+```python
+from datetime import date
+import project_planner as pp
+
+ws = pp.open_workspace(":memory:")
+ws.new_project("Leveling demo", start=date(2026, 10, 5))
+alice = ws.add_resource("Alice", hourly_rate="100")
+a = ws.add_task("Task A", duration="2d")
+b = ws.add_task("Task B", duration="2d")
+ws.set_assignment(a, alice, percent=70)
+ws.set_assignment(b, alice, percent=70)
+
 ws.schedule()
-preview = ws.level_preview()
-print(preview.delays_days, preview.finish_delta_days)
-ws.apply_leveling()                                     # the preview becomes ws.result()
-ws.reset_to_dependency_schedule()                       # back to the dependency-only schedule
+print("Peak load:", max(s.percent for s in ws.loading(alice).segments), "%")
 
-# Save, CSV round trip.
-with tempfile.TemporaryDirectory() as tmp:
-    info = ws.save_as("Demo")
-    print(info.name, [p.name for p in ws.list_projects()])
-    path = Path(tmp) / "demo.csv"
-    ws.export_csv(path)
-    other = pp.open_workspace(":memory:")
-    summary = other.import_csv(path)
-    print(summary.nodes, other.schedule().total_cost)
-    other.close()
-ws.close()
+preview = ws.level_preview()                  # nothing changes until you apply
+print("Delays (days):", dict(preview.delays_days))
+ws.apply_leveling()                           # or ws.discard_leveling()
+print("Peak after leveling:", max(s.percent for s in ws.loading(alice).segments), "%")
+print("Finish:", ws.result().project_finish, "| cost:", ws.result().total_cost)
+```
+```text
+Peak load: 140 %
+Delays (days): {'t2': Decimal('2')}
+Peak after leveling: 70 %
+Finish: 2026-10-08 17:00:00 | cost: 2240.0
 ```
 
-The same flow is available as an executed notebook: [`examples/quickstart.ipynb`](examples/quickstart.ipynb).
+`ws.reset_to_dependency_schedule()` returns to the schedule without leveling.
 
-## Key concepts
-
-- **Working-time axis.** Scheduling runs on an integer-minute axis of working time only (non-working days, holidays and hours outside the workday do not exist on it). Intervals are half-open, `[start, finish)`; displayed finishes use the end-of-working-period convention (a task ending Friday shows `Friday 17:00`, not Monday 09:00).
-- **Units.** Duration, effort and lag are entered in hours or days (`pp.hours(40)`, `pp.days(2)`, `"40h"`, `"-0.5d"`) and stored exactly as entered; bare numbers are rejected. Days convert using the calendar's hours per day at calculation time. All planning outputs are in **days** (`duration_days`, `effort_days`, `leveling_delay_days`, ...), as `Decimal`. Effort days are person-days.
-- **Cost reporting units.** `cost_report_unit` is `person_hours`, `person_days` (default) or `person_years` (hours per day times working days per year). It changes work quantities only; cost totals are identical. Money is `Decimal`, one currency code per project, rounded half-even to 2 places for display and export.
-- **Calendar initialisation.** Every new project starts with a calendar (Mon-Fri, 8 h/day, 220 days/year, 09:00 start). `ws.calendar.initialize(...)` sets everything at once and validates all arguments together; setters adjust single fields. CSV import never inherits calendar values from the previously open project.
-- **Dependencies.** Types `FS`, `SS`, `FF`, `SF`. Lag is signed (`-0.5d` is a lead) and in hours or days. Cycles, self-dependencies, duplicates and dependencies on groups are rejected when you add them.
-- **Leveling.** Never runs by itself. `level_preview()` computes delays without changing the current result; `apply_leveling()` makes the preview current; `discard_leveling()` drops it; `reset_to_dependency_schedule()` returns to the dependency-only result. Priority is earliest dependency-only start, then WBS order, then ID.
-- **Staleness and fingerprints.** Editing does not recalculate. The workspace compares fingerprints of the project definition against those stored with the result, and `ws.state()` reports `stale_dates` and `stale_costs`. A rate change refreshes costs immediately without staling dates; anything that can move dates marks them stale until you call `schedule()` again.
-- **Save/load vs CSV.** `save`, `save_as`, `load`, `list_projects` and `delete_project` manage named projects in the SQLite file, restoring stored results verbatim. CSV (`export_csv`, `import_csv`) is a portable text description of one project, parsed completely before anything changes; calculated columns in a CSV are never imported. Replacing operations (`new_project`, `load`, `import_csv`) raise `UnsavedChanges` on a dirty workspace unless `discard_unsaved=True`.
-
-## Usage patterns
-
-**Notebooks and scripts** call the synchronous forms (`ws.schedule()`, `ws.level_preview()`). Results render as HTML tables in Jupyter and have `.to_records()` (plain dicts) and `.to_dataframe()` (needs pandas).
-
-**UIs** call the `submit_*` forms, which return a `Job` immediately (`ws.submit_schedule()`, `ws.submit_leveling_preview()`). A workspace belongs to the thread that opened it, so do not touch it from worker threads. Instead poll from the UI thread; with Tkinter use `after()`:
+### 5. Saving, loading and CSV
 
 ```python
-def tick():
-    for job in ws.poll_jobs():        # jobs that finished since the last call
-        refresh_views()
-    progress_bar["value"] = job.progress * 100
-    if not job.done():
-        root.after(100, tick)
+from datetime import date
+import project_planner as pp
 
-job = ws.submit_schedule()
-root.after(100, tick)
+with pp.open_workspace("plans.db") as ws:     # one workspace per file at a time
+    ws.new_project("Office move", start=date(2026, 10, 5))
+    ws.add_task("Pack", duration="2d")
+    ws.schedule()
+    ws.save_as("Office move")
+    ws.export_csv("office_move.csv")          # portable text copy
+
+with pp.open_workspace("plans.db") as ws:
+    print([p.name for p in ws.list_projects()])
+    ws.load(ws.list_projects()[0])            # restores the saved schedule as-is
+    print(ws.result().project_finish)
+    ws.add_task("Unpack", duration="1d")
+    print("unsaved:", ws.state().dirty, "| dates out of date:", ws.state().stale_dates)
+    try:
+        ws.import_csv("office_move.csv")
+    except pp.UnsavedChanges:
+        print("save or pass discard_unsaved=True first")
+    summary = ws.import_csv("office_move.csv", discard_unsaved=True)
+    print("imported", summary.nodes, "node(s)")
+```
+```text
+['Office move']
+2026-10-06 17:00:00
+unsaved: True | dates out of date: True
+save or pass discard_unsaved=True first
+imported 1 node(s)
 ```
 
-(Tkinter snippet, illustrative only; `ws`, `root`, `progress_bar` and `refresh_views` belong to your application.)
+The CSV layout, including all error codes, is described in [`docs/csv_format.md`](docs/csv_format.md).
 
-Jobs run in a spawn-based process pool, so scripts that submit jobs must guard their entry point, and a frozen (PyInstaller) app must call `freeze_support()`:
+### 6. When something is wrong
 
-```python
-if __name__ == "__main__":
-    import multiprocessing
-
-    multiprocessing.freeze_support()
-    main()
-```
-
-For tests and simple scripts, `ws.submit_schedule(executor=pp.InlineExecutor())` runs the job on the calling thread.
-
-## Error model
-
-Failures are typed exceptions deriving from `pp.PlannerError`: `ValidationFailed` and `ImportFailed` (both carry a list of `Issue`s), `NotFound`, `Conflict`, `UnsavedChanges`, `Cancelled`. Each `Issue` is field-addressed: `severity`, a stable `code`, `message`, `object_type`, `object_id`, `field` and, for CSV imports, the 1-based `line`. All problems found in one call are reported together. Wrong Python types (a bare number as a duration, a `float` as money) raise `TypeError`. See the code table in [docs/api.md](docs/api.md).
+Errors are typed exceptions. Each one carries field-level issues with a stable `code`, and every problem found in a call is reported together.
 
 ```python
+from datetime import date
+import project_planner as pp
+
+ws = pp.open_workspace(":memory:")
+ws.new_project("Errors", start=date(2026, 10, 5))
+a = ws.add_task("A", duration="1d")
+b = ws.add_task("B", duration="1d")
+ws.add_dependency(a, b)
 try:
-    ws.add_dependency(design, design)
+    ws.add_dependency(b, a)                   # would close a cycle
 except pp.ValidationFailed as exc:
     for issue in exc.issues:
-        print(issue.code, issue.object_type, issue.field)   # DEP_SELF dependency succ_id
+        print(issue.code, "-", issue.message)
+try:
+    ws.add_task("C", duration=5)              # unit missing
+except TypeError as exc:
+    print("TypeError:", exc)
+```
+```text
+DEP_CYCLE - dependency cycle among 2 nodes: t1, t2
+TypeError: bare number 5 has no time unit; use hours(5) or days(5), or a string such as '5h' (hours) or '5d' (days)
 ```
 
-## Running tests, lint and type checks
+### 7. Background calculation (for UIs)
 
-```bash
-.venv\Scripts\python -m pytest                    # default: everything except perf and notebook
-.venv\Scripts\python -m pytest -m notebook        # executes examples/quickstart.ipynb
-.venv\Scripts\python -m pytest -m perf            # benchmarks (slow)
-set HYPOTHESIS_PROFILE=ci                         # more property-test examples (PowerShell: $env:HYPOTHESIS_PROFILE="ci")
-.venv\Scripts\python -m ruff check .
-.venv\Scripts\python -m ruff format --check .
+`ws.schedule()` and `ws.level_preview()` block until they finish, which suits notebooks. A UI should use the `submit_*` forms instead. They return a `Job` with `progress`, `cancel()` and `result()`, and the calculation runs in a separate process.
+
+```python
+from datetime import date
+import project_planner as pp
+
+if __name__ == "__main__":                    # required: jobs use a process pool
+    ws = pp.open_workspace(":memory:")
+    ws.new_project("Background", start=date(2026, 10, 5))
+    ws.add_task("Big task", duration="10d")
+    job = ws.submit_schedule()                # returns immediately
+    result = job.result(timeout=60)           # a UI would poll ws.poll_jobs() instead
+    print(job.status, result.project_finish)
+```
+```text
+done 2026-10-16 17:00:00
+```
+
+A workspace belongs to the thread that opened it. In Tkinter, poll from the UI thread with `root.after(100, ...)`, calling `ws.poll_jobs()` each time. A frozen (PyInstaller) app must also call `multiprocessing.freeze_support()`. See [`docs/api.md`](docs/api.md) for the full pattern.
+
+### In a Jupyter notebook
+
+Results, cost reports, loading views and task details display as tables. They also offer `.to_records()`, and `.to_dataframe()` if pandas is installed. [`examples/quickstart.ipynb`](examples/quickstart.ipynb) is a complete walk-through:
+
+```powershell
+.venv\Scripts\python -m pip install notebook
+.venv\Scripts\python -m jupyter notebook examples/quickstart.ipynb
+```
+
+## Running the tests
+
+Run all of these from the repository root. The everyday run takes about half a minute and skips the slow benchmarks and the notebook test.
+
+```powershell
+.venv\Scripts\python -m pytest -q
+```
+
+| What | Command |
+|---|---|
+| Spec acceptance scenarios only (A01–A27) | `.venv\Scripts\python -m pytest -q tests/acceptance` |
+| One file | `.venv\Scripts\python -m pytest -q tests/unit/test_leveling.py` |
+| Tests whose name matches a word | `.venv\Scripts\python -m pytest -q -k cost` |
+| Execute the example notebook | `.venv\Scripts\python -m pytest -q -m notebook` |
+| Performance benchmarks (1k / 10k / 50k tasks, ~2 min) | `.venv\Scripts\python -m pytest -q -m perf -s` |
+| Thorough property tests (500 random cases per check) | `$env:HYPOTHESIS_PROFILE="ci"; .venv\Scripts\python -m pytest -q tests/property` |
+| Coverage report | `.venv\Scripts\python -m pytest -q --cov=project_planner --cov-report=term-missing` |
+
+Useful flags:
+- `-v` lists every test by name.
+- `-x` stops at the first failure.
+- `--lf` re-runs only the tests that failed last time.
+
+Lint and type checks:
+
+```powershell
+.venv\Scripts\python -m ruff check src tests
 .venv\Scripts\python -m mypy
 ```
 
-## Project layout
+To type `pytest` and `python` directly, activate the environment once per terminal with `.venv\Scripts\Activate.ps1`.
 
-```
-src/project_planner/
-  __init__.py       public facade (pp.__all__ is the supported surface)
-  notebook.py       HTML reprs, to_records, to_dataframe
-  engine/           pure scheduling logic: model, calendar, validation, sizing, forward pass,
-                    leveling, loading, cost, csv_io, results (no I/O)
-  persistence/      SQLite schema, migrations, repositories
-  services/         workspace facade, edit/compute/files services, background jobs, read models
-tests/              unit, acceptance, property, services, csv, notebook, perf
-examples/           quickstart.ipynb
-docs/               api.md, csv_format.md, decisions.md, contracts.md, performance.md
-```
+**What the test suite covers:**
+- **Acceptance tests:** every spec scenario, with hand-computed expected dates and costs.
+- **Unit tests:** each engine module.
+- **Property tests (Hypothesis):** random projects that must always satisfy invariants. For example, every dependency holds, leveling never changes cost, and save/load and CSV round-trip exactly.
+- **Service tests:** run against real SQLite and include deliberate failure injection, to prove that a failed save, load or import changes nothing.
+
+## Performance
+
+Both of the spec's targets are met with a wide margin, measured on 10,000-task projects:
+- scheduling takes about 0.9 s, against a target of 2 s;
+- leveling takes about 1.1 s, against a target of 30 s.
+
+Full results for 1k, 10k and 50k tasks are in [`docs/performance.md`](docs/performance.md).
 
 ## Documentation
 
-- [docs/api.md](docs/api.md): Python API reference.
-- [docs/csv_format.md](docs/csv_format.md): CSV import/export format and error codes.
-- [docs/decisions.md](docs/decisions.md): resolved design decisions (leveling, units, rounding, ...).
-- [docs/performance.md](docs/performance.md): benchmark results and targets.
-- [examples/quickstart.ipynb](examples/quickstart.ipynb): runnable tour of the API.
+- [`docs/api.md`](docs/api.md): Python API reference and the error and issue codes.
+- [`docs/csv_format.md`](docs/csv_format.md): CSV import/export format.
+- [`docs/decisions.md`](docs/decisions.md): every resolved design decision (D1–D15).
+- [`docs/performance.md`](docs/performance.md): benchmark results and hotspots.
+- [`docs/review_spec_conformance.md`](docs/review_spec_conformance.md) and [`docs/review_code.md`](docs/review_code.md): independent reviews and their findings.
+- [`docs/contracts.md`](docs/contracts.md): internal module contracts, for contributors.

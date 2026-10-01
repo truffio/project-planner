@@ -237,13 +237,34 @@ Parallel agents must agree on these names. T10 publishes them as real code. Afte
 
 ## 4. Orchestration rules for sub-agents
 
-1. Each agent reads the spec, `proposed_architectures_backend.md5` §1 and §8, and this plan before starting.
+1. **Lean context:** each agent reads only its own task section, §2–§3 of this plan (decisions and contracts), and the spec sections its task references. Review agents (T50, T51) are the exception and read everything. Keeping implementation agents lean is the main way to control token cost (§4.1).
 2. **File ownership:** an agent creates or edits only the files listed under its task's *Owns*. It may read anything. If it needs a change in a file owned by another task, it reports that rather than editing the file.
 3. Tasks in the same wave run in parallel. Agents in a wave that touch shared configuration (e.g. `pyproject.toml`) must not do so. Only T00 owns it.
 4. **Tests ship with the code:** each implementation task includes its unit tests, and is done only when `pytest <its tests>`, `ruff check`, and `mypy --strict` on its files pass.
 5. **Test-first for acceptance:** T05 writes the acceptance tests before implementation, marked `xfail(strict=True)`. Each implementation task removes the `xfail` marks for the scenarios it makes pass.
-6. Agent type: `general-purpose` for implementation and test tasks. A fresh `general-purpose` agent with no implementation history for review tasks (T50, T51). Parallel waves can use `isolation: worktree` and be merged by the orchestrator after each wave.
+6. Agent type: `general-purpose` for implementation and test tasks, launched with the model in the task's **Model** line (§4.1). A fresh `general-purpose` agent with no implementation history for review tasks (T50, T51). Parallel waves can use `isolation: worktree` and be merged by the orchestrator after each wave.
 7. **Final report from every agent:** files changed, tests added, test command output summary, deviations from contracts, open questions.
+
+### 4.1 Model assignment (agreed 2026-10-01)
+
+Each task names the cheapest model that can do it reliably. Stronger models go only where a hidden mistake would spread to downstream tasks.
+
+| Model | Price per MTok (input / output) | Relative cost | Tasks |
+|---|---|---|---|
+| Haiku 4.5 (`haiku`) | $1 / $5 | 1× | T00, T01, T40, T43 |
+| Sonnet 5.5 (`sonnet`) | $2 / $10 | 2× | T02, T11, T12, T13, T14, T15, T16, T17, T19, T20, T30, T31, T33, T34, T35, T41, T42, T44 |
+| Opus 5.5 (`opus`) | $4 / $20 | 4× | T05, T10, T18, T32, T50, T51, and the orchestrator |
+| Fable 5.1 (`fable`) | $10 / $50 | 10× | None by default; last-resort escalation only |
+
+Prices were taken from the Claude API reference cached on 2026-09-25.
+
+Rules:
+
+1. **Escalate only after failure.** A task that fails its tests or review twice on its assigned model is re-run one tier up (Haiku → Sonnet → Opus). Fable is used only after an Opus task fails twice, and only with the user's approval.
+2. **Fixes stay with the owner's model.** Failures found in T40, T41, T50 or T51 go back to the owning task and its assigned model, not to a stronger model.
+3. **A fresh agent per task.** Never chain several tasks through one long-lived agent: accumulated context is re-billed on every turn.
+4. **The user checks the foundations.** The user reviews the outputs of T05 (acceptance oracles) and T10 (contracts) before Wave 1 fans out.
+5. **Record escalations.** Each escalation is logged in the orchestrator's wave summary with the reason, so the assignments can be re-tuned for later phases.
 
 ---
 
@@ -254,6 +275,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 ### Wave 0 — Foundations (T00, T01, T02, T05 run in parallel)
 
 **T00 — Repository scaffolding and tooling**
+- Model: **Haiku** — boilerplate with a mechanical done-check.
 - Owns: `pyproject.toml`, `src/project_planner/__init__.py` (stub), every package `__init__.py`, `tests/conftest.py`, `.gitignore`, `ruff`/`mypy`/`pytest` config, `README.md` (skeleton).
 - Work:
   - `src` layout and extras from §1.1.
@@ -265,6 +287,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: tooling smoke test (`import project_planner`; version present).
 
 **T01 — Decision record**
+- Model: **Haiku** — transcribes §2 of this plan.
 - Owns: `docs/decisions.md`.
 - Work:
   - Record each default from §2 with the spec reference, the rationale, and the config constant name.
@@ -274,6 +297,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: none (documentation).
 
 **T02 — CSV format specification**
+- Model: **Sonnet** — bounded format design; fixtures must agree exactly with the spec.
 - Owns: `docs/csv_format.md`, `tests/fixtures/csv/*.csv` (valid and invalid samples).
 - Work: define the single record-type CSV format.
   - Columns: `record_type`, `schema_version`, plus typed fields per record type (`PROJECT`, `CALENDAR`, `HOLIDAY`, `EXCEPTION`, `RESOURCE`, `NODE`, `ASSIGNMENT`, `DEPENDENCY`), and export-only result fields (`RESULT_NODE`, `RESULT_ASSIGNMENT`, `RESULT_PROJECT`).
@@ -291,6 +315,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: none directly (the fixtures are used by T20/T33).
 
 **T05 — Acceptance test suite (test-first)**
+- Model: **Opus** — these tests are the reference for everything else, and wrong hand-computed dates would mislead every downstream task.
 - Owns: `tests/acceptance/test_a01_…_a23.py`, `tests/acceptance/conftest.py`.
 - Work:
   - Encode A01–A21 and A23–A27 (A22 is UI/launch and out of scope here; note that in the file) as tests against the **public facade** from §1.2, using exact expected values from the spec, expressed in the §2.1 output units. Examples:
@@ -318,6 +343,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 ### Wave 1 — Engine core
 
 **T10 — Domain model, errors, config, test builders** (must finish before T11–T20 start)
+- Model: **Opus** — small, but it freezes the contracts every parallel agent depends on.
 - Owns: `engine/model.py`, `engine/errors.py`, `engine/config.py`, `tests/fixtures/builders.py`, `tests/unit/test_model.py`.
 - Work:
   - The frozen dataclasses and enums from §3, with structural invariants: one assignment per (task, resource), milestone has zero sizing, group has no sizing.
@@ -334,6 +360,7 @@ The legend for the "Tests" line is the test types each task must deliver.
   - property: `minutes_to_days(to_minutes(days(x)))` == x when x × minutes_per_day is whole.
 
 **T11 — Calendar and working-time axis** (parallel after T10)
+- Model: **Sonnet** — edge-case heavy, but the property tests catch errors.
 - Owns: `engine/calendar.py`, `tests/unit/test_calendar.py`, `tests/property/test_calendar_props.py`.
 - Work:
   - Build `WorkingAxis` from working weekdays, hours/day, holidays, and working/nonworking exceptions.
@@ -351,6 +378,7 @@ The legend for the "Tests" line is the test types each task must deliver.
   - Unblocks A04.
 
 **T12 — Validation and cycle detection** (parallel after T10)
+- Model: **Sonnet** — standard algorithms.
 - Owns: `engine/validation.py`, `engine/network.py`, `tests/unit/test_validation.py`, `tests/unit/test_network.py`.
 - Work:
   - Checks: dangling references, self-dependency, group endpoints (rejected per decision 5), duplicate dependency, percent range, negative effort or duration, WBS parent cycles, orphans.
@@ -362,6 +390,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: unit; property (a random DAG is never flagged, and adding a back edge always is).
 
 **T13 — Sizing** (parallel after T10)
+- Model: **Sonnet** — formulas given; Decimal rounding needs care.
 - Owns: `engine/sizing.py`, `tests/unit/test_sizing.py`.
 - Work:
   - Convert the as-entered `TimeQty` to axis minutes with the calendar's minutes per day (§2.1). Effort in days is person-days.
@@ -375,6 +404,7 @@ The legend for the "Tests" line is the test types each task must deliver.
   - property: effort-mode D × Σa ≥ E, and the difference is less than one minute × Σa.
 
 **T14 — Cost** (parallel after T10)
+- Model: **Sonnet** — formulas given.
 - Owns: `engine/cost.py`, `tests/unit/test_cost.py`.
 - Work:
   - Per assignment: hours = D × a, cost = hours × rate, in `Decimal`. Task cost is the sum.
@@ -387,6 +417,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: unit; property (task cost = D × Σ(aᵢ × rateᵢ) exactly; leveling-independent).
 
 **T15 — Forward pass** (after T11 and T12)
+- Model: **Sonnet** — the formula is specified; property tests check every dependency.
 - Owns: `engine/forward_pass.py`, `tests/unit/test_forward_pass.py`, `tests/property/test_forward_pass_props.py`.
 - Work:
   - Convert lag from its as-entered `TimeQty` (hours or days, signed) to axis minutes.
@@ -399,6 +430,7 @@ The legend for the "Tests" line is the test types each task must deliver.
   - property: every dependency constraint holds for every scheduled pair; no start < 0; result is deterministic.
 
 **T16 — Rollup** (parallel with T15; needs only node results)
+- Model: **Sonnet** — simple tree aggregation.
 - Owns: `engine/rollup.py`, `tests/unit/test_rollup.py`.
 - Work:
   - Group start/finish as min/max over scheduled descendants.
@@ -409,6 +441,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: unit (nested groups, empty groups, overlapping children); property (group total = sum of leaves, regardless of nesting).
 
 **T17 — Resource loading** (parallel with T15)
+- Model: **Sonnet** — standard sweep-line.
 - Owns: `engine/loading.py`, `tests/unit/test_loading.py`, `tests/property/test_loading_props.py`.
 - Work:
   - Per-resource sweep-line producing piecewise-constant segments `(start, end, percent, task_ids)`, uncapped.
@@ -418,6 +451,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: unit (touching intervals at `[a,b)` boundaries do not overlap; zero-length milestones are ignored); property (∫segments = Σ assignment minutes; peak ≥ average).
 
 **T18 — Leveling** (after T15 and T17)
+- Model: **Opus** — the hardest algorithm: termination, delays pushed through chains, unresolvable cases, cancellation.
 - Owns: `engine/leveling.py`, `tests/unit/test_leveling.py`, `tests/property/test_leveling_props.py`.
 - Work:
   - Serial placement per decision 1. For each task, find the earliest feasible start ≥ its dependency-earliest start, where feasible means every assigned resource stays ≤ 100% over `[s, s+D)` against the placed load.
@@ -437,6 +471,7 @@ The legend for the "Tests" line is the test types each task must deliver.
     - the algorithm terminates.
 
 **T19 — Results assembly, fingerprints, orchestration** (after T13–T18)
+- Model: **Sonnet** — glue code with clear rules.
 - Owns: `engine/results.py`, `engine/fingerprint.py`, `engine/schedule.py`, `tests/unit/test_schedule.py`, `tests/unit/test_fingerprint.py`.
 - Work:
   - `schedule()`: validate → sizing → forward pass → rollup → loading → cost → result.
@@ -453,6 +488,7 @@ The legend for the "Tests" line is the test types each task must deliver.
   - an elapsed span that crosses a weekend is larger than the working span.
 
 **T20 — CSV import/export (engine side)** (after T10 and T12; needs T02)
+- Model: **Sonnet** — spec-driven, with fixtures to test against.
 - Owns: `engine/csv_io.py`, `tests/csv/test_csv_io.py`.
 - Work:
   - `parse(text_stream) -> Project | raises ImportFailed(issues with row/column)`. Parses the whole file before returning; checks schema version; IDs stay text.
@@ -468,6 +504,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 ### Wave 2 — Persistence and services
 
 **T30 — SQLite schema, migrations, repositories** (after T10; parallel with Wave 1 engine work)
+- Model: **Sonnet** — conventional persistence.
 - Owns: `persistence/*`, `tests/services/test_persistence.py`.
 - Work:
   - Normalized schema per architecture doc §3.2. Project `kind ∈ {saved, workspace}`; `schedule_runs` (kind, fingerprints, created_at); `node_results`, `assignment_results`, `loading_segments`, `issues`.
@@ -484,6 +521,7 @@ The legend for the "Tests" line is the test types each task must deliver.
   - `:memory:` support.
 
 **T31 — Workspace edit service** (after T30 and T19)
+- Model: **Sonnet** — large but routine; the staleness rules are specified.
 - Owns: `services/workspace.py` (edit and state parts), `services/dto.py`, `services/events.py`, `tests/services/test_workspace_edits.py`.
 - Work:
   - All edit operations from §1.2: nodes (add, rename, move, reorder), sizing, assignments (setting one updates the existing pair), dependencies, calendar, resources, project settings.
@@ -499,6 +537,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: services (every edit operation; dirty and stale transitions; delete preview/commit/conflict; rate edit changes cost only).
 
 **T32 — Compute service and jobs** (after T31)
+- Model: **Opus** — concurrency, pickling, cancellation and results arriving after edits are subtle and intermittent, so tests often miss errors.
 - Owns: `services/jobs.py`, and the compute parts of `services/workspace.py` (coordinate with T31 through a separate module, `services/compute.py`, which `workspace.py` delegates to).
 - Work:
   - `schedule()` / `level_preview()` (synchronous), plus `submit_schedule()` / `submit_leveling_preview()` → `Job`.
@@ -512,6 +551,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: services (sync vs. async give identical results; cancellation applies nothing; an edit during a job produces a stale result; preview/apply/discard/reset state machine; worker exception surfaces as a typed error).
 
 **T33 — Project files: save / load / new / import / export** (after T31; parallel with T32)
+- Model: **Sonnet** — transactional rollback is well understood; fault-injection tests guard it.
 - Owns: `services/files.py`, `tests/services/test_files.py`.
 - Work:
   - Save, save-as, load, list, delete named projects, and new.
@@ -527,6 +567,7 @@ The legend for the "Tests" line is the test types each task must deliver.
   - export of a stale result is marked stale.
 
 **T34 — Read models (UI/notebook queries)** (after T31; parallel with T32 and T33)
+- Model: **Sonnet** — queries returning plain data objects.
 - Owns: `services/read_models.py`, `tests/services/test_read_models.py`.
 - Work, per architecture doc §8.5:
   - `wbs_rows(parent_id, expanded_ids, offset, limit)` with display numbers, sizing as entered (value + unit), `duration_days`, `effort_days`, dates, cost and status;
@@ -541,6 +582,7 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: services (windowing correctness, collapsed groups excluded from rows but present in export, cost breakdown matches A16/A21).
 
 **T35 — Public facade and notebook ergonomics** (after T31–T34)
+- Model: **Sonnet** — a thin layer over the services.
 - Owns: `src/project_planner/__init__.py` (exports), `notebook.py`, `docs/api.md`, `tests/unit/test_public_api.py`.
 - Work:
   - `open_workspace(path | ":memory:")`. The API accepts objects or IDs interchangeably.
@@ -556,12 +598,14 @@ The legend for the "Tests" line is the test types each task must deliver.
 ### Wave 3 — Hardening, examples, review
 
 **T40 — Acceptance suite green**
+- Model: **Haiku** — removes markers only; failures go back to the owning task and its model (§4.1 rule 2).
 - Owns: `tests/acceptance/*` (marks only, no logic changes).
 - Work: remove all remaining `xfail` marks. Any failure goes back to the owning task.
 - Done when: A01–A21 and A23–A27 pass; A22 is documented as out of scope for this backend phase.
 - Tests: acceptance.
 
 **T41 — Cross-module property and integration tests**
+- Model: **Sonnet** — generating valid random projects takes skill, but is within Sonnet's range.
 - Owns: `tests/property/test_end_to_end_props.py`, `tests/fixtures/generators.py`.
 - Work:
   - A Hypothesis strategy for random valid projects (calendars, nested WBS, mixed sizing, 0–N assignments, random DAG dependencies with all four types and signed lags).
@@ -576,12 +620,14 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: property.
 
 **T42 — Performance benchmarks**
+- Model: **Sonnet** — project generator plus timing; no optimization.
 - Owns: `tests/perf/*`, `tools/generate_large_project.py`.
 - Work: generate 1k, 10k and 50k task projects with realistic structure. Time schedule, level, save, load, CSV export/import, and windowed reads, and check against the spec §4.1 targets (decision 8).
 - Done when: a report table is produced in `docs/performance.md`. Hotspots are reported to the orchestrator; no optimization is done in this task.
 - Tests: perf (`-m perf`, excluded by default).
 
 **T43 — Example notebook and notebook test**
+- Model: **Haiku** — follows the §1.2 API example; escalate to Sonnet if it gets stuck.
 - Owns: `examples/quickstart.ipynb`, `tests/notebook/test_quickstart.py`.
 - Work:
   - The notebook walks through: create a project, build the calendar, add resources and WBS, assign, add dependencies, schedule, inspect cost and loading (A16 numbers), create an overload, preview and apply leveling, save, load, export CSV, import CSV.
@@ -590,17 +636,20 @@ The legend for the "Tests" line is the test types each task must deliver.
 - Tests: notebook.
 
 **T44 — Documentation**
+- Model: **Sonnet** — must describe the code accurately.
 - Owns: `README.md` (content), `docs/api.md` (finalize with T35), `docs/csv_format.md` (finalize with T20).
 - Work: installation, quickstart, API reference by module, error model, the sync vs. job usage pattern for UI integrators (including Tkinter `after()` polling guidance and `freeze_support`), decisions summary.
 - Done when: a fresh agent can follow the README to run the quickstart without reading the source.
 - Tests: none; T43 covers executable docs.
 
 **T50 — Spec-conformance review** (fresh agent)
+- Model: **Opus** — judgment across the whole codebase; finding gaps is the point.
 - Owns: `docs/review_spec_conformance.md`.
 - Work: walk the spec section by section and map each "shall" to code and tests. List gaps, deviations and untested requirements.
 - Done when: every "shall" in §3–§12 is mapped or listed as a gap.
 
 **T51 — Code review** (fresh agent; run `/code-review` at high effort on the full diff)
+- Model: **Opus** — finding subtle defects across the whole codebase is the point.
 - Owns: `docs/review_code.md`.
 - Work: correctness, determinism, Decimal/float leaks, transaction boundaries, process-pool pickling, public API consistency.
 - Done when: findings are triaged; fixes are assigned back to the owning tasks.

@@ -110,3 +110,47 @@ def test_equal_decimal_values_hash_equal() -> None:
 def test_hex_sha256() -> None:
     s, c = fps(base())
     assert len(s) == len(c) == 64 and s != c
+
+
+def test_unassigned_resource_is_not_a_schedule_or_cost_input() -> None:
+    p = base()
+    more = dataclasses.replace(
+        p,
+        resources=(*p.resources, ProjectBuilder().resource("spare", rate=5).build().resources[0]),
+    )
+    assert fps(p) == fps(more)
+    assert fps(p) == fps(dataclasses.replace(more, resources=p.resources))
+
+
+def test_unassigned_resource_rate_edit_changes_nothing() -> None:
+    p = (
+        ProjectBuilder()
+        .resource("a", rate=1)
+        .resource("b", rate=1)
+        .task("t", duration="1d")
+        .build()
+    )
+    p = dataclasses.replace(p, assignments=())
+    q = dataclasses.replace(
+        p, resources=tuple(dataclasses.replace(r, hourly_rate=None) for r in p.resources)
+    )
+    assert fps(p) == fps(q)
+
+
+def test_assigning_a_resource_changes_both_fingerprints() -> None:
+    p = ProjectBuilder().resource("a", rate=1).task("t", duration="1d").build()
+    q = ProjectBuilder().resource("a", rate=1).task("t", duration="1d").assign("t", "a", 50).build()
+    assert schedule_fp(p) != schedule_fp(q) and cost_fp(p) != cost_fp(q)
+
+
+@pytest.mark.parametrize(
+    ("what", "changed"),
+    [
+        ("calendar_hours", lambda: base(hours=7)),
+        ("start", lambda: base(start=date(2026, 10, 6))),
+        ("duration", lambda: base(duration="6d")),
+        ("lag", lambda: base(lag="1d")),
+    ],
+)
+def test_every_date_input_changes_schedule_fp(what: str, changed) -> None:
+    assert schedule_fp(base()) != schedule_fp(changed()), what

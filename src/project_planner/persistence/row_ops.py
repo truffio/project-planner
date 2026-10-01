@@ -190,13 +190,28 @@ def set_name(conn: sqlite3.Connection, pk: int, name: str) -> None:
 
 
 def set_based_on(
-    conn: sqlite3.Connection, pk: int, based_on_pk: int | None, based_on_revision: int | None
+    conn: sqlite3.Connection,
+    pk: int,
+    based_on_pk: int | None,
+    based_on_revision: int | None,
+    based_on_results_gen: int | None = None,
 ) -> None:
-    """Record which saved project / revision the workspace was last saved to or loaded at."""
-    conn.execute(
-        "UPDATE projects SET based_on_pk = ?, based_on_revision = ? WHERE pk = ?",
-        (based_on_pk, based_on_revision, pk),
-    )
+    """Record which saved project / revision the workspace was last saved to or loaded at.
+
+    ``based_on_results_gen`` (schema v2) is the results generation at that moment; ``None``
+    leaves the stored value unchanged.
+    """
+    if based_on_results_gen is None:
+        conn.execute(
+            "UPDATE projects SET based_on_pk = ?, based_on_revision = ? WHERE pk = ?",
+            (based_on_pk, based_on_revision, pk),
+        )
+    else:
+        conn.execute(
+            "UPDATE projects SET based_on_pk = ?, based_on_revision = ?, "
+            "based_on_results_gen = ? WHERE pk = ?",
+            (based_on_pk, based_on_revision, based_on_results_gen, pk),
+        )
 
 
 def _calendar_scalars(cal: Calendar) -> tuple[str, str, int, str]:

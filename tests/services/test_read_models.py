@@ -27,7 +27,7 @@ def D(x: str | int) -> Decimal:
 
 
 def calc(ws: Workspace) -> None:
-    ws.store_result(schedule(ws.project()))
+    ws._store_result(schedule(ws.project()))
 
 
 @pytest.fixture
@@ -349,7 +349,7 @@ def test_dependency_links(ws):
     assert [(link.pred_id, link.succ_id) for link in only] == [(ids["t1"], ids["t3"])]
     assert rm.dependency_links(ws, []) == []
     # works without a result too
-    ws.discard_results()
+    ws._discard_results()
     assert rm.dependency_links(ws, [ids["t3"], ids["m"]])[0].lag_days == D(1)
 
 
@@ -384,7 +384,7 @@ def test_cache_invalidation_on_edit_and_result_change(ws):
     assert rm.wbs_rows(ws, expanded_ids=frozenset(ids.values())).rows[2].finish == datetime(
         2026, 10, 6, 17
     )
-    ws.discard_results()
+    ws._discard_results()
     assert rm.wbs_rows(ws).rows[0].start is None
 
 
@@ -436,8 +436,8 @@ def test_10k_tasks_windowed_queries_fast(ws):
                 b.assign(f"t{g}_{k}", "r1", 50)
     project = b.build()
     assert len(project.nodes) == 10_000
-    repo.save_project(ws.connection, ws.project_pk, project)
-    ws.reload()
+    repo.save_project(ws._connection, ws._project_pk, project)
+    ws._reload()
     calc(ws)
     expanded = frozenset(n.id for n in ws.project().nodes if n.kind is NodeKind.GROUP)
 

@@ -48,7 +48,9 @@ from project_planner.persistence.records import (
 )
 
 __all__ = [
+    "bump_results_gen",
     "bump_revision",
+    "check_revision",
     "copy_project",
     "create_project",
     "create_workspace",
@@ -93,8 +95,8 @@ def _require(conn: sqlite3.Connection, project_pk: int) -> sqlite3.Row | tuple[A
 def get_project_record(conn: sqlite3.Connection, project_pk: int) -> ProjectRecord:
     """Metadata of a stored project. Raises ``NotFound``."""
     row = conn.execute(
-        "SELECT pk, kind, name, revision, based_on_pk, based_on_revision, saved_at "
-        "FROM projects WHERE pk = ?",
+        "SELECT pk, kind, name, revision, based_on_pk, based_on_revision, saved_at, "
+        "results_gen, based_on_results_gen FROM projects WHERE pk = ?",
         (project_pk,),
     ).fetchone()
     if row is None:
@@ -148,15 +150,89 @@ def create_workspace(conn: sqlite3.Connection, project: Project) -> int:
     return create_project(conn, project, "workspace")
 
 
-def bump_revision(conn: sqlite3.Connection, project_pk: int) -> int:
-    """Increment and return the project's revision. Raises ``NotFound``."""
+def _stale_writer(revision: int, expected: int, what: str = "revision") -> Conflict:
+    return Conflict(
+        f"the project database was changed by another connection ({what} {revision}, "
+        f"expected {expected}); close this workspace and open the file again"
+    )
+
+
+def check_revision(
+    conn: sqlite3.Connection,
+    project_pk: int,
+    revision: int,
+    results_gen: int | None = None,
+) -> None:
+    """Raise ``Conflict`` unless the stored revision (and results generation) are as given.
+
+    Optimistic-concurrency guard (D12): a writer that cached ``revision`` must not
+    write over changes made through another connection. Raises ``NotFound``.
+    """
+    row = conn.execute(
+        "SELECT revision, results_gen FROM projects WHERE pk = ?", (project_pk,)
+    ).fetchone()
+    if row is None:
+        raise NotFound(ObjectType.PROJECT.value, str(project_pk))
+    if int(row[0]) != revision:
+        raise _stale_writer(int(row[0]), revision)
+    if results_gen is not None and int(row[1]) != results_gen:
+        raise _stale_writer(int(row[1]), results_gen, "results generation")
+
+
+def bump_revision(conn: sqlite3.Connection, project_pk: int, expected: int | None = None) -> int:
+    """Increment and return the project's revision.
+
+    With ``expected`` the update only happens if the stored revision equals it
+    (``UPDATE ... WHERE revision = ?``); otherwise ``Conflict`` is raised (D12).
+
+    Raises:
+        NotFound: unknown pk.
+        Conflict: the stored revision differs from ``expected``.
+    """
+    with transaction(conn):
+        if expected is None:
+            cur = conn.execute(
+                "UPDATE projects SET revision = revision + 1 WHERE pk = ?", (project_pk,)
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE projects SET revision = revision + 1 WHERE pk = ? AND revision = ?",
+                (project_pk, expected),
+            )
+        if cur.rowcount == 0:
+            row = conn.execute(
+                "SELECT revision FROM projects WHERE pk = ?", (project_pk,)
+            ).fetchone()
+            if row is None:
+                raise NotFound(ObjectType.PROJECT.value, str(project_pk))
+            assert expected is not None
+            raise _stale_writer(int(row[0]), expected)
+        row = conn.execute("SELECT revision FROM projects WHERE pk = ?", (project_pk,)).fetchone()
+    return int(row[0])
+
+
+def bump_results_gen(
+    conn: sqlite3.Connection, project_pk: int, *, revision: int, results_gen: int
+) -> int:
+    """Increment and return the results generation (stored results changed).
+
+    Only succeeds if the stored revision and results generation are the expected ones.
+
+    Raises:
+        NotFound: unknown pk.
+        Conflict: the stored revision / generation differ (another writer).
+    """
     with transaction(conn):
         cur = conn.execute(
-            "UPDATE projects SET revision = revision + 1 WHERE pk = ?", (project_pk,)
+            "UPDATE projects SET results_gen = results_gen + 1 "
+            "WHERE pk = ? AND revision = ? AND results_gen = ?",
+            (project_pk, revision, results_gen),
         )
         if cur.rowcount == 0:
-            raise NotFound(ObjectType.PROJECT.value, str(project_pk))
-        row = conn.execute("SELECT revision FROM projects WHERE pk = ?", (project_pk,)).fetchone()
+            check_revision(conn, project_pk, revision, results_gen)
+        row = conn.execute(
+            "SELECT results_gen FROM projects WHERE pk = ?", (project_pk,)
+        ).fetchone()
     return int(row[0])
 
 

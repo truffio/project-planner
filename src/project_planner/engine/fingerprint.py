@@ -2,10 +2,13 @@
 
 ``schedule_fp`` hashes exactly the inputs that influence dates: project start,
 calendar (except ``working_days_per_year`` and holiday/exception names), node
-kinds/parents/order/sizing, resource IDs, assignments and dependencies.  Names,
+kinds/parents/order/sizing, assignments (which carry the resource IDs that matter) and
+dependencies. Resources themselves (IDs, names, rates) are not schedule inputs, so adding or
+removing an unassigned resource leaves dates current.  Names,
 rates, currency, ``cost_report_unit`` and ``working_days_per_year`` are excluded.
 
-``cost_fp`` hashes the schedule inputs plus the hourly rates, so a rate change
+``cost_fp`` hashes the schedule inputs plus the hourly rates of *assigned* resources (an
+unassigned resource's rate costs nothing), so a rate change
 alters ``cost_fp`` only and a rename alters neither.
 
 Numbers are written as normalized plain strings (``5``, ``5.0`` and ``5.00``
@@ -19,6 +22,7 @@ import json
 from decimal import Decimal
 from typing import Any
 
+from project_planner.engine.config import engine_context
 from project_planner.engine.model import Project, TimeQty
 
 __all__ = ["cost_fp", "schedule_fp"]
@@ -66,7 +70,6 @@ def _schedule_payload(project: Project) -> dict[str, Any]:
             ),
             key=lambda row: row[0],
         ),
-        "resources": sorted(r.id for r in project.resources),
         "assignments": sorted(
             [a.task_id, a.resource_id, _num(a.percent)] for a in project.assignments
         ),
@@ -76,14 +79,19 @@ def _schedule_payload(project: Project) -> dict[str, Any]:
     }
 
 
+@engine_context
 def schedule_fp(project: Project) -> str:
     """SHA-256 (hex) of the inputs that affect dates."""
     return _digest({"schedule": _schedule_payload(project)})
 
 
+@engine_context
 def cost_fp(project: Project) -> str:
     """SHA-256 (hex) of the schedule inputs plus hourly rates."""
+    assigned = {a.resource_id for a in project.assignments}
     rates = sorted(
-        [r.id, None if r.hourly_rate is None else _num(r.hourly_rate)] for r in project.resources
+        [r.id, None if r.hourly_rate is None else _num(r.hourly_rate)]
+        for r in project.resources
+        if r.id in assigned
     )
     return _digest({"schedule": _schedule_payload(project), "rates": rates})

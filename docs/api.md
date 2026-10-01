@@ -12,17 +12,19 @@ t = ws.add_task("Design", effort=pp.hours(40))
 print(ws.schedule().working_span_days)
 ```
 
-Conventions: all IDs are strings; every method that takes an ID also accepts an object with an `.id`; money is `Decimal` (pass `str` or `Decimal`, never `float`); planning outputs are in days.
+Conventions: all IDs are strings (except saved-project ids, see Files); every method that takes an ID also accepts an object with an `.id`; money is `Decimal` (pass `str` or `Decimal`, never `float`); planning outputs are in days.
 
 ## Workspace lifecycle
 
 - `pp.open_workspace(path=":memory:", *, config=pp.Config())` returns a `Workspace` (creates and migrates the SQLite file if needed). A fresh database holds an empty "Untitled" project.
 - `pp.Config` (frozen dataclass) holds limits and rounding: `max_assignment_percent=Decimal(100)`, `days_display_decimals=2`, `money_display_decimals=2`, `money_rounding` and `days_rounding` (`"ROUND_HALF_EVEN"`).
 - `ws.close()`, or `with pp.open_workspace(...) as ws:`.
+- A database file can be open in only one workspace at a time (in this or any other process). A second `pp.open_workspace(path)` raises `Conflict` ("... is already open in another workspace ..."). The lock (an OS lock on a `<file>.lock` sidecar file, which may stay on disk harmlessly) is released by `ws.close()`, by leaving the `with` block, when the workspace is garbage collected, and when the process ends, even after a crash. `":memory:"` workspaces are independent. As a second safeguard every write checks that the database still holds the revision the workspace last saw, and raises `Conflict` if another connection changed it.
+- `ws.config` is the read-only `Config` the workspace was opened with.
 - `ws.new_project(name, start, *, currency="USD", cost_report_unit="person_days", calendar=None, discard_unsaved=False)` (`calendar` is an optional `pp.CalendarSettings`).
 - `ws.subscribe(callback) -> unsubscribe` for change events. `callback(event)` receives an event with `kind` (`"edited"`, `"result_stored"`, `"project_replaced"`), `revision`, `ids` and `operation`; it runs synchronously on the calling thread after the change commits, and an exception in a callback is logged, not propagated.
-- `ws.dirty` is the same flag as `state().dirty` (unsaved changes). `ws.state()` returns `WorkspaceState(revision, dirty, stale_dates, stale_costs, has_preview, has_result)`. `ws.result()` is the stored current result (leveled if applied, else dependency-only, else `None`); it may be stale, compare with `state()`.
-- `ws.discard_results(kinds=None)` drops stored results (all kinds, or the given run kinds). `ws.store_result`, `ws.mark_clean`, `ws.reload`, `ws.require_clean`, `ws.results`, `ws.connection` and `ws.project_pk` are plumbing used by the services; application code does not need them.
+- `ws.dirty` is the same flag as `state().dirty` (unsaved changes). It is true after any edit of the definition and after any change to the stored results (calculating, a leveling preview, applying or discarding leveling, resetting, a job result being stored) since the last save or load; `save()`, `save_as()` and `load()` clear it. `ws.state()` returns `WorkspaceState(revision, dirty, stale_dates, stale_costs, has_preview, has_result)`. `ws.result()` is the stored current result (leveled if applied, else dependency-only, else `None`); it may be stale, compare with `state()`.
+- Extension internals: the service modules use underscore-prefixed workspace members (`_store_result`, `_discard_results`, `_mark_clean`, `_reload`, `_require_clean`, `_connection`, `_results`, `_project_pk`). They are not part of the public API and may change; application code uses the methods documented here (`discard_leveling()` / `reset_to_dependency_schedule()` to drop results).
 - A workspace is bound to the thread that opened it. Use it from that thread only.
 
 ## Editing
@@ -71,7 +73,7 @@ Leveling state machine: `schedule()` stores a dependency-only result (replacing 
 
 `Job` has `kind`, `status` (`"pending" | "running" | "done" | "failed" | "cancelled"`), `progress` (0..1), `message`, `done()`, `poll()`, `cancel() -> bool`, `result(timeout=None)` (raises `Cancelled` for a cancelled job, re-raises a failure), `error`, `stored`.
 
-Results are stored on the workspace's own thread, the first time you call `job.result()`, `job.done()`, `job.poll()`, read `job.status`, call `ws.poll_jobs()`, or call `ws.state()` / `ws.result()` (both poll first). A job never overwrites a newer stored result or a replaced project; cancelling stores nothing; edits made while a job runs make its result stale on arrival.
+Results are stored on the workspace's own thread, the first time you call `job.result()`, `job.done()`, `job.poll()`, read `job.status`, call `ws.poll_jobs()`, or call `ws.state()` / `ws.result()` (both poll first). A job never overwrites a newer stored result or a replaced project, and a result you explicitly removed after submitting stays removed (a preview job finishing after `discard_leveling()`, `apply_leveling()` or `reset_to_dependency_schedule()` is not stored; `job.stored` is `False`); cancelling stores nothing; edits made while a job runs make its result stale on arrival.
 
 ### Tkinter polling
 
@@ -106,8 +108,9 @@ For tests and simple scripts pass `executor=pp.InlineExecutor()` to run the job 
 
 ## Files and CSV
 
-- `ws.save()` overwrites the tracked saved copy (the first save uses the project name; a name collision raises `Conflict`). `ws.save_as(name)`. Both return `ProjectInfo(id, name, saved_at)`.
-- `ws.list_projects() -> list[ProjectInfo]` (newest first), `ws.load(project_id, *, discard_unsaved=False)`, `ws.delete_project(project_id)`. Stored results are restored verbatim on load.
+- `ws.save()` overwrites the tracked saved copy (the first save uses the project name; a name collision raises `Conflict`). `ws.save_as(name)` raises `Conflict("a saved project named 'X' already exists — choose another name")` for a name in use. Both return `ProjectInfo(id, name, saved_at)`.
+- `ws.list_projects() -> list[ProjectInfo]` (newest first), `ws.load(project, *, discard_unsaved=False)`, `ws.delete_project(project)`; `project` is a `ProjectInfo` or its `id`. `ProjectInfo.id` is an `int` (the one exception to "IDs are strings"; a decimal string is accepted too) and is never reused, so a stale `ProjectInfo` raises `NotFound` instead of reaching another project. Stored results are restored verbatim on load.
+- `save`, `save_as` and `load` are all-or-nothing: on any failure neither the workspace nor the saved projects change. Change events are sent after the operation has completed (after `load`, subscribers already see `dirty == False`).
 - `ws.export_csv(destination=None) -> str` returns the CSV text and writes the file (UTF-8, no BOM) when a path is given. Stale results are marked stale in the export.
 - `ws.import_csv(source, *, discard_unsaved=False) -> ImportSummary` (`nodes, resources, assignments, dependencies, holidays, exceptions` counts, `notes` (info `Issue`s such as `CSV_DEFAULT_APPLIED`, `CSV_RESULTS_IGNORED`), `defaults_applied` messages). `source` is a path, a `Path`, an open text file, or CSV text (a string containing a newline). The file is parsed completely before anything changes; errors raise `ImportFailed` with every `Issue` (1-based `line`, column in `field`) and leave the workspace untouched. After a successful import the workspace is dirty and `ws.result()` is `None`.
 - Replacing operations (`load`, `import_csv`, `new_project`) raise `UnsavedChanges` when the workspace is dirty unless `discard_unsaved=True`. The CSV format is described in `docs/csv_format.md`.
@@ -116,8 +119,8 @@ For tests and simple scripts pass `executor=pp.InlineExecutor()` to run the job 
 
 All take IDs or objects and are cheap to call repeatedly (cached per revision and result).
 
-- `ws.cost_report(unit=None) -> CostReportView` (`unit`, `total_cost`, `work_qty`, `complete`, `missing_rate_resources`, `nodes`, `.node(id)`). `unit` is `"person_hours" | "person_days" | "person_years"`; cost totals are identical across units. `Conflict` without a result.
-- `ws.task_details(task, unit=None) -> TaskDetails` (sizing, dates, cost, predecessors, successors, `assignments`).
+- `ws.cost_report(unit=None) -> CostReportView` (`unit`, `total_cost`, `work_qty`, `complete`, `missing_rate_resources`, `nodes`, `.node(id)`). `unit` is `"person_hours" | "person_days" | "person_years"` (anything else raises `ValidationFailed` with code `COST_BAD_UNIT`, field `unit`); cost totals are identical across units. `Conflict` without a result.
+- `ws.task_details(task, unit=None) -> TaskDetails` (same `unit` values and check) (sizing, dates, cost, predecessors, successors, `assignments`).
 - `ws.loading(resource, *, time_window=None, granularity="segments") -> LoadingView`. `granularity` is `"segments"`, `"day"` or `"week"`; `time_window` is a `(start, end)` datetime pair. `segments` (always filled) are `(start, end, percent, task_ids, overloaded)`; `buckets` (day/week only) are `(period_start, assigned_days, average_percent, peak_percent, overloaded)`. Also `resource_id`, `resource_name`, `capacity_percent`.
 - `ws.wbs_rows(*, parent=None, expanded_ids=(), offset=0, limit=None) -> WbsPage(rows, total)` (`WbsRow`: `id, name, kind, depth, wbs_number, has_children, expanded, sizing, duration_days, effort_days, start, finish, assignments_summary, cost, cost_complete, status`), `ws.gantt_rows(*, expanded_ids=(), offset=0, limit=None, time_window=None) -> list[GanttRow]` (`row_index, id, kind, start, finish, is_milestone, is_summary, leveling_delay_days`), `ws.dependency_links(nodes) -> list[Link]` (`pred_id, succ_id, type, lag_days`), `ws.nonworking_ranges(start, end) -> list[tuple[date, date]]` (inclusive, merged), `ws.project_summary() -> ProjectSummary` (counts, calendar, revision, dirty, result kind, finish, span, cost, staleness flags).
 
@@ -162,6 +165,7 @@ Engine issue codes (`Issue.code`; severity is `error` unless noted). They appear
 | `DEP_DANGLING`, `DEP_SELF`, `DEP_GROUP_ENDPOINT`, `DEP_DUPLICATE`, `DEP_CYCLE` | Dependency endpoint missing, self-dependency, endpoint is a group, same pred/succ/type twice, dependency cycle (message lists the nodes). | `pred_id`, `succ_id`, `type` |
 | `ASSIGN_TASK_DANGLING`, `ASSIGN_RESOURCE_DANGLING`, `ASSIGN_NOT_TASK`, `ASSIGN_PERCENT_RANGE`, `ASSIGNMENT_PERCENT_RANGE`, `DUPLICATE_ASSIGNMENT` | Assignment target missing or not a task; percent not in `(0, max_assignment_percent]`; pair repeated. | `task_id`, `resource_id`, `percent` |
 | `RESOURCE_NEGATIVE_RATE`, `PROJECT_BAD_CURRENCY` | Negative or non-finite hourly rate; currency not three uppercase letters. | `hourly_rate`, `currency` |
+| `COST_BAD_UNIT` | `cost_report` / `task_details` unit is not `person_hours`, `person_days` or `person_years`. | `unit` |
 | `COST_MISSING_RATE` (warning) | An assigned resource has no hourly rate; costs are incomplete. | `hourly_rate` |
 | `TASK_UNSIZED`, `TASK_NO_CAPACITY` | Task has no duration/effort; effort-sized task has no assigned capacity. Warnings from validation, errors on the schedule result (the task is unscheduled and the result is incomplete). | `sizing`, `assignments` |
 | `CAL_BAD_VALUE`, `CAL_HOURS_PER_DAY_RANGE`, `CAL_HOURS_PER_DAY_PRECISION`, `CAL_DAYS_PER_YEAR_RANGE`, `CAL_NO_WORKING_WEEKDAYS`, `CAL_WORKDAY_OVERFLOW` | Calendar arguments: wrong form, hours/day outside `(0, 24]` or not a whole number of minutes, days/year outside `1..366`, no working weekday, workday start plus hours past 24:00. | calendar field name |

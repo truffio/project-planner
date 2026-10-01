@@ -5,12 +5,17 @@ Module-level functions taking the :class:`~services.workspace.Workspace` first;
 
 Conventions:
 
-* A saved project's ``id`` is its persistence primary key (an ``int``); ``load`` and
-  ``delete_project`` also accept a decimal string.
+* A saved project's ``id`` is its persistence primary key (an ``int``, never reused
+  after a delete: schema v2 uses ``AUTOINCREMENT``); ``load`` and ``delete_project``
+  also accept a decimal string (and ``Workspace.load`` / ``delete_project`` accept the
+  ``ProjectInfo`` itself).
+* ``save``, ``save_as`` and ``load`` are each one transaction including the "mark
+  clean" bookkeeping; events are emitted after the commit with the final state.
 * The workspace remembers the saved project it was last saved to / loaded from in
   ``projects.based_on_pk``. ``save`` overwrites that copy (keeping its saved name);
   without one it saves under the project's name (``Conflict`` on a name clash).
-* Every replacing operation is one SQLite transaction, and CSV text is parsed completely
+* Every replacing operation is one SQLite transaction (which first checks the
+  workspace revision, D12), and CSV text is parsed completely
   before the workspace is touched, so a failure leaves the workspace unchanged.
 * A CSV import leaves the workspace *dirty* (it is not saved anywhere): the revision is
   bumped and ``based_on`` is cleared.
@@ -77,7 +82,7 @@ def _pk(project_id: int | str) -> int:
 
 
 def _saved_info(ws: Workspace, pk: int) -> ProjectInfo:
-    record = repo.get_project_record(ws.connection, pk)
+    record = repo.get_project_record(ws._connection, pk)
     return ProjectInfo(record.pk, record.name, record.saved_at)
 
 
@@ -85,7 +90,7 @@ def _saved_record(ws: Workspace, project_id: int | str) -> int:
     """pk of an existing *saved* project, else ``NotFound``."""
     pk = _pk(project_id)
     try:
-        record = repo.get_project_record(ws.connection, pk)
+        record = repo.get_project_record(ws._connection, pk)
     except NotFound:
         raise NotFound(ObjectType.PROJECT.value, str(project_id)) from None
     if record.kind != "saved":
@@ -93,86 +98,116 @@ def _saved_record(ws: Workspace, project_id: int | str) -> int:
     return pk
 
 
+def _name_taken(ws: Workspace, name: str) -> bool:
+    row = ws._connection.execute(
+        "SELECT 1 FROM projects WHERE kind = 'saved' AND name = ?", (name,)
+    ).fetchone()
+    return row is not None
+
+
 def list_projects(ws: Workspace) -> list[ProjectInfo]:
     """Saved projects, newest first."""
-    return [ProjectInfo(pk, name, at) for pk, name, at in repo.list_saved_projects(ws.connection)]
+    return [ProjectInfo(pk, name, at) for pk, name, at in repo.list_saved_projects(ws._connection)]
 
 
 def save(ws: Workspace) -> ProjectInfo:
     """Save the workspace (definition and all results) and mark it clean.
 
     Overwrites the saved project the workspace was loaded from / saved to; a workspace
-    that was never saved is saved under the project's name.
+    that was never saved is saved under the project's name. Copy and "mark clean" are
+    one transaction: on any failure neither the saved copies nor the workspace change.
 
     Raises:
         Conflict: first save and a different saved project already has that name
-            (use :func:`save_as`).
+            (use :func:`save_as`), or another connection changed the workspace.
     """
-    conn = ws.connection
-    record = repo.get_project_record(conn, ws.project_pk)
-    target = record.based_on_pk
-    existing: str | None = None
-    if target is not None:
-        try:
-            target_record = repo.get_project_record(conn, target)
-            if target_record.kind == "saved":
-                existing = target_record.name
-        except NotFound:
-            pass
-    if existing is not None and target is not None:
-        pk = repo.copy_project(conn, ws.project_pk, target, kind="saved", name=existing)
-    else:
-        name = ws.project().name
-        if any(n == name for _, n, _ in repo.list_saved_projects(conn)):
-            raise Conflict(
-                f"a saved project named {name!r} already exists; use save_as with another name"
-            )
-        pk = repo.copy_project(conn, ws.project_pk, None, kind="saved", name=name)
-    ws.mark_clean(pk)
+    ws._check_open()
+    conn = ws._connection
+    with transaction(conn):
+        ws._check_revision()
+        record = repo.get_project_record(conn, ws._project_pk)
+        target = record.based_on_pk
+        existing: str | None = None
+        if target is not None:
+            try:
+                target_record = repo.get_project_record(conn, target)
+                if target_record.kind == "saved":
+                    existing = target_record.name
+            except NotFound:
+                pass
+        if existing is not None and target is not None:
+            pk = repo.copy_project(conn, ws._project_pk, target, kind="saved", name=existing)
+        else:
+            name = ws.project().name
+            if _name_taken(ws, name):
+                raise Conflict(
+                    f"a saved project named {name!r} already exists; use save_as with another name"
+                )
+            pk = repo.copy_project(conn, ws._project_pk, None, kind="saved", name=name)
+        ws._write_clean(pk)
+    ws._set_clean()
     return _saved_info(ws, pk)
 
 
 def save_as(ws: Workspace, name: str) -> ProjectInfo:
-    """Save the workspace as a new saved project ``name`` and track it.
+    """Save the workspace as a new saved project ``name`` and track it (one transaction).
 
     Raises:
-        Conflict: a saved project with that name exists.
+        Conflict: a saved project with that name exists, or another connection
+            changed the workspace.
     """
     if not isinstance(name, str):
         raise TypeError(f"name must be a str, got {type(name).__name__}")
     if not name.strip():
         raise Conflict("a saved project needs a non-empty name")
-    pk = repo.copy_project(ws.connection, ws.project_pk, None, kind="saved", name=name)
-    ws.mark_clean(pk)
+    ws._check_open()
+    conn = ws._connection
+    with transaction(conn):
+        ws._check_revision()
+        if _name_taken(ws, name):
+            raise Conflict(f"a saved project named {name!r} already exists — choose another name")
+        pk = repo.copy_project(conn, ws._project_pk, None, kind="saved", name=name)
+        ws._write_clean(pk)
+    ws._set_clean()
     return _saved_info(ws, pk)
 
 
 def load(ws: Workspace, project_id: int | str, *, discard_unsaved: bool = False) -> None:
     """Replace the workspace by a saved project, results included, without recalculating.
 
+    Copy and "mark clean" run in one transaction; ``project_replaced`` is emitted after
+    the commit, when the workspace is already clean.
+
     Raises:
         UnsavedChanges: the workspace is dirty and ``discard_unsaved`` is false.
         NotFound: unknown saved project (workspace untouched).
+        Conflict: another connection changed the workspace.
     """
-    ws.require_clean(discard_unsaved)
+    ws._check_open()
+    ws._require_clean(discard_unsaved)
     pk = _saved_record(ws, project_id)
-    conn = ws.connection
+    conn = ws._connection
+    wpk = ws._project_pk
     with transaction(conn):
-        name = repo.load_project(conn, pk).name
-        repo.copy_project(conn, pk, ws.project_pk, kind="workspace", name=name)
-    ws.reload(operation="load")
-    ws.mark_clean(pk)
+        ws._check_revision()
+        row = conn.execute("SELECT project_name FROM projects WHERE pk = ?", (pk,)).fetchone()
+        repo.copy_project(conn, pk, wpk, kind="workspace", name=str(row[0]))
+        record = repo.get_project_record(conn, wpk)
+        row_ops.set_based_on(conn, wpk, pk, record.revision, record.results_gen)
+    ws._reload(operation="load")
 
 
 def delete_project(ws: Workspace, project_id: int | str) -> None:
     """Delete a saved project (never the workspace). Raises ``NotFound``."""
+    ws._check_open()
     pk = _saved_record(ws, project_id)
-    record = repo.get_project_record(ws.connection, ws.project_pk)
-    with transaction(ws.connection):
-        repo.delete_saved_project(ws.connection, pk)
+    conn = ws._connection
+    with transaction(conn):
+        record = repo.get_project_record(conn, ws._project_pk)
+        repo.delete_saved_project(conn, pk)
         if record.based_on_pk == pk:
             # The workspace no longer tracks a saved copy; keep its dirty state.
-            row_ops.set_based_on(ws.connection, ws.project_pk, None, record.based_on_revision)
+            row_ops.set_based_on(conn, ws._project_pk, None, record.based_on_revision)
 
 
 def _read_source(source: str | Path | TextIO) -> str | bytes:
@@ -203,17 +238,20 @@ def import_csv(
         UnsavedChanges: the workspace is dirty and ``discard_unsaved`` is false.
         ImportFailed: the file has errors (workspace byte-identical).
     """
-    ws.require_clean(discard_unsaved)
-    outcome = csv_io.parse(_read_source(source))
+    ws._check_open()
+    ws._require_clean(discard_unsaved)
+    outcome = csv_io.parse(_read_source(source), config=ws.config)
     project = outcome.project
-    conn = ws.connection
+    conn = ws._connection
+    wpk = ws._project_pk
     with transaction(conn):
-        repo.save_project(conn, ws.project_pk, project)
-        repo.delete_runs(conn, ws.project_pk)
-        row_ops.set_name(conn, ws.project_pk, project.name)
-        repo.bump_revision(conn, ws.project_pk)  # revision >= 2, so never equal to 1
-        row_ops.set_based_on(conn, ws.project_pk, None, 1)
-    ws.reload(operation="import_csv")
+        # revision >= 2 afterwards, so never equal to the based-on revision 1: dirty
+        repo.bump_revision(conn, wpk, expected=ws._revision)
+        repo.save_project(conn, wpk, project)
+        repo.delete_runs(conn, wpk)
+        row_ops.set_name(conn, wpk, project.name)
+        row_ops.set_based_on(conn, wpk, None, 1)
+    ws._reload(operation="import_csv")
     cal = project.calendar
     return ImportSummary(
         nodes=len(project.nodes),
@@ -234,7 +272,12 @@ def export_csv(ws: Workspace, destination: str | Path | None = None) -> str:
     marked stale in the export.
     """
     state = ws.state()
-    text = csv_io.export(ws.project(), ws.result(), stale=state.stale_dates or state.stale_costs)
+    text = csv_io.export(
+        ws.project(),
+        ws.result(),
+        stale=state.stale_dates or state.stale_costs,
+        config=ws.config,
+    )
     if destination is not None:
         with open(destination, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)

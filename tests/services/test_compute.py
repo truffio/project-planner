@@ -99,9 +99,9 @@ def test_preview_does_not_replace_current_result(ws: Workspace, tasks: tuple[str
     assert preview.delays_days[t2] == Decimal(3)
     assert ws.state().has_preview is True
     assert ws.result() == base
-    assert ws.results.get("leveling_preview") == preview.result
+    assert ws._results.get("leveling_preview") == preview.result
     # the stored base was current, so it was reused (not recalculated / replaced)
-    assert ws.results.get("dependency_only") is base
+    assert ws._results.get("dependency_only") is base
 
 
 def test_level_preview_calculates_missing_base(ws: Workspace, tasks: tuple[str, ...]) -> None:

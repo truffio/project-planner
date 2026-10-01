@@ -8,8 +8,8 @@ without touching the engine modules.
 * ``to_dataframe()`` imports pandas lazily; when pandas is missing it raises
   ``ImportError`` that names ``pip install project_planner[notebook]``.
 * Task *names* are not part of an engine result. ``Workspace.schedule()`` / ``result()``
-  attach them (see :func:`attach_names`) so the tables show names; without them the
-  node IDs are shown.
+  attach them (see :func:`attach_names`; kept in a side cache, the frozen result is
+  never modified) so the tables show names; without them the node IDs are shown.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import html
 import importlib
+import weakref
 from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal
 from enum import Enum
@@ -27,7 +28,7 @@ from project_planner.engine.results import LevelingResult, NodeResult, ScheduleR
 from project_planner.services.read_models import CostReportView, LoadingView, TaskDetails
 from project_planner.services.workspace import CalendarApi
 
-__all__ = ["attach_names", "html_table", "to_dataframe_from_records"]
+__all__ = ["attach_names", "html_table", "names_of", "to_dataframe_from_records"]
 
 Record = dict[str, Any]
 
@@ -92,17 +93,56 @@ def to_dataframe_from_records(records: list[Record]) -> Any:
     return pandas.DataFrame(records)
 
 
+# Display names live in a side cache keyed by result identity, never on the (frozen,
+# shared) result object itself: nothing is mutated, equality and pickling are
+# unaffected, and job workers never receive name maps.
+_NamesEntry = tuple[int, Mapping[str, str]]
+_NAMES: dict[int, tuple[weakref.ref[ScheduleResult], _NamesEntry]] = {}
+_NAMES_BY_FP: dict[tuple[str, str, str], _NamesEntry] = {}  # results without weakref support
+_NAMES_BY_FP_MAX = 64
+
+
+def _fp_key(result: ScheduleResult) -> tuple[str, str, str]:
+    return (str(result.kind), result.schedule_fp, result.cost_fp)
+
+
+def _held(result: ScheduleResult) -> _NamesEntry | None:
+    entry = _NAMES.get(id(result))
+    if entry is not None and entry[0]() is result:
+        return entry[1]
+    return _NAMES_BY_FP.get(_fp_key(result))
+
+
 def attach_names(result: ScheduleResult, project: Project, revision: int) -> None:
-    """Remember node names on ``result`` for display (refreshed when ``revision`` changes)."""
-    held = result.__dict__.get("_names")
+    """Remember node names for displaying ``result`` (refreshed when ``revision`` changes).
+
+    The names are kept in a module side cache keyed by the result object (dropped when
+    the result is garbage collected); the result itself is not modified.
+    """
+    held = _held(result)
     if held is not None and held[0] == revision:
         return
-    names = {n.id: n.name for n in project.nodes}
-    object.__setattr__(result, "_names", (revision, names))
+    entry: _NamesEntry = (revision, {n.id: n.name for n in project.nodes})
+    key = id(result)
+
+    def _forget(_ref: weakref.ref[ScheduleResult], key: int = key) -> None:
+        current = _NAMES.get(key)
+        if current is not None and current[0] is _ref:
+            del _NAMES[key]
+
+    try:
+        ref = weakref.ref(result, _forget)
+    except TypeError:  # result type without __weakref__: fall back to its fingerprints
+        if len(_NAMES_BY_FP) >= _NAMES_BY_FP_MAX:
+            _NAMES_BY_FP.pop(next(iter(_NAMES_BY_FP)))
+        _NAMES_BY_FP[_fp_key(result)] = entry
+        return
+    _NAMES[key] = (ref, entry)
 
 
-def _names_of(result: ScheduleResult) -> Mapping[str, str]:
-    held = result.__dict__.get("_names")
+def names_of(result: ScheduleResult) -> Mapping[str, str]:
+    """Node names attached to ``result`` by :func:`attach_names` (empty if none)."""
+    held = _held(result)
     return {} if held is None else held[1]
 
 
@@ -127,7 +167,7 @@ def _node_record(row: NodeResult, names: Mapping[str, str]) -> Record:
 
 
 def _schedule_records(self: ScheduleResult) -> list[Record]:
-    names = _names_of(self)
+    names = names_of(self)
     return [_node_record(r, names) for r in self.tasks()]
 
 

@@ -102,7 +102,7 @@ All other columns are empty on result records.
 
 ## 3. Record types and fields
 
-Exactly one `PROJECT` and exactly one `CALENDAR` are mandatory. All other types may appear zero or more times, except `NODE` which must appear at least once (`CSV_MISSING_NODE`; a project with no WBS node is not importable).
+Exactly one `PROJECT` and exactly one `CALENDAR` are mandatory. All other types, including `NODE`, may appear zero or more times; an empty project (no WBS node) is valid and round-trips. (Batch B change: `CSV_MISSING_NODE` was removed.)
 
 ### 3.1 PROJECT
 
@@ -165,7 +165,7 @@ The value and unit are stored exactly as entered (plan §2.1); `5 d` and `40 h` 
 |---|---|
 | `task_id` | Required; must reference a NODE of kind `task` (`CSV_DANGLING_REFERENCE` if absent; `CSV_ASSIGN_NON_TASK` for group or milestone). |
 | `resource_id` | Required; must reference a RESOURCE. |
-| `percent` | Required plain number, `> 0` and `<= MAX_ASSIGNMENT_PERCENT` (default 100). `80` means 80 %, never `0.8` and never `80%`. Non-numeric: `CSV_BAD_NUMBER`; out of range: `CSV_OUT_OF_RANGE`. |
+| `percent` | Required plain number, `> 0` and `<= Config.max_assignment_percent` (default 100; `csv_io.parse(..., config=...)` and the workspace's config decide). `80` means 80 %, never `0.8` and never `80%`. Non-numeric: `CSV_BAD_NUMBER`; out of range: `CSV_OUT_OF_RANGE`. |
 
 The pair (`task_id`, `resource_id`) must be unique: the second occurrence is `CSV_DUPLICATE_ASSIGNMENT` (column `resource_id`).
 
@@ -191,7 +191,7 @@ Result records are written only by export. On import they are **ignored** (secti
 
 | Column | Content |
 |---|---|
-| `schedule_status` | `current`, `stale` (definition changed since the last schedule run; values are out of date) or `incomplete` (the last run could not schedule everything). |
+| `schedule_status` | `current`, `stale` (definition changed since the last schedule run; values are out of date), `incomplete` (the last run could not schedule everything) or `stale_incomplete` (both: out of date and the stored run was itself incomplete). |
 | `schedule_kind` | `dependency_only` or `leveled`. |
 | `start`, `finish` | Project start / finish datetimes (4.1). |
 | `working_span_days` | Working days between project start and finish. |
@@ -236,6 +236,14 @@ Encoding: weekday abbreviations joined with `;` (semicolon, no spaces), e.g. `Mo
 ### 4.4 Identifiers
 
 IDs are opaque text, compared exactly after whitespace trimming (section 1). `001` and `1` are different IDs; case matters (`T1` is not `t1`). Parsers must never convert IDs to numbers (spreadsheets that do so are outside the guarantee). NODE, RESOURCE and DEPENDENCY IDs are separate namespaces; the same text may be used in each.
+
+### 4.5 Formula-injection guard
+
+Spreadsheets run text cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return as formulas. On export, every free-text column (`name`, `id`, `parent_id`, `task_id`, `resource_id`, `pred_id`, `succ_id`) whose value starts with one of those characters, optionally after leading apostrophes, is prefixed with one `'`. On import the rule is reversed for the same columns: if a cell starts with one or more `'` followed by one of those characters, one leading `'` is removed. The mapping is exact, so any text round-trips (`=1+1` is written `'=1+1`; `'=x` is written `''=x`). Numeric cells (`lag_value`, `percent`, ...) are never altered, so negative lags stay plain numbers. Other text starting with an apostrophe (`'hello`) is untouched.
+
+### 4.6 Rounding of exported values
+
+Day and money cells use the workspace `Config` (`days_display_decimals`, `money_display_decimals` and their rounding modes; defaults 2 decimals, half-even). `work_qty` and `rate_per_unit` always keep up to 6 decimals with trailing zeros stripped (decision D13).
 
 ## 5. Ordering of records
 
@@ -303,7 +311,6 @@ Model errors (phase 2):
 |---|---|---|
 | `CSV_MISSING_PROJECT` | No `PROJECT` row (line 1). | `record_type` |
 | `CSV_MISSING_CALENDAR` | No `CALENDAR` row (line 1). | `record_type` |
-| `CSV_MISSING_NODE` | No `NODE` row (line 1). | `record_type` |
 | `CSV_DUPLICATE_ID` | Repeated `id` within NODE, within RESOURCE or within DEPENDENCY (on the later row; message gives the first line). | `id` |
 | `CSV_DUPLICATE_DATE` | Repeated date among HOLIDAY, among EXCEPTION, or one date in both. | `date` |
 | `CSV_DANGLING_REFERENCE` | An ID reference matches no record of the right type. | the referencing column |
@@ -329,7 +336,7 @@ Self-dependency and group-endpoint rows are excluded from the cycle search, so a
 3. **Results.**
    - If the project has never been scheduled (no result object), **no `RESULT_*` record is written**.
    - If results exist, `RESULT_PROJECT`, one `RESULT_NODE` per node and one `RESULT_ASSIGNMENT` per assignment are written.
-   - `RESULT_PROJECT.schedule_status` is `current` only when the results match the present definition; `stale` when the definition changed after the last schedule run (the values written are the old ones); `incomplete` when the engine reported the schedule as incomplete. Stale takes precedence over incomplete.
+   - `RESULT_PROJECT.schedule_status` is `current` only when the results match the present definition; `stale` when the definition changed after the last schedule run (the values written are the old ones); `incomplete` when the engine reported the schedule as incomplete; `stale_incomplete` when both apply, so neither condition is hidden.
    - Nodes without results (unscheduled) get a `RESULT_NODE` with `node_status` = `unscheduled`, empty start/finish.
 4. **Costs** use the project's `cost_report_unit`: `work_qty`, `work_unit` and `rate_per_unit` are in that unit; `cost` is unit independent (plan §2.2). A missing rate leaves `rate_per_unit` and `cost` empty on that assignment and `cost_complete` = `false` on it, on its node and on the project.
 5. **Leveling.** `schedule_kind` = `leveled` and `leveling_delay_days` carry the applied delays; a dependency-only schedule writes `0`.

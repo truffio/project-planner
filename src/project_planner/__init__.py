@@ -12,6 +12,7 @@ Typical use::
 See ``docs/api.md`` for the reference.
 """
 
+import re
 from decimal import Decimal
 
 from project_planner import notebook as _notebook  # registers _repr_html_ / to_records
@@ -71,13 +72,16 @@ from project_planner.services.workspace import CalendarApi, Workspace, open_work
 
 __version__ = "0.1.0"
 
+_FLOAT_LITERAL = re.compile(r"-?\d+(\.\d+)?")
+
 
 def hours(x: int | str | Decimal | float) -> TimeQty:
     """A quantity in hours: ``pp.hours(40)``, ``pp.hours("1.5")``.
 
     Unlike :func:`project_planner.engine.model.hours`, a ``float`` literal such as ``0.5``
-    is accepted (converted through its shortest decimal text, so ``0.5`` is exactly
-    ``0.5``) so that the plan 1.2 example ``pp.days(-0.5)`` works. ``bool`` is rejected.
+    is accepted when its shortest ``repr`` has at most 6 decimal places and no exponent
+    (decision D14); ``pp.days(0.1 + 0.2)`` raises ``TypeError``: pass a string. ``bool``
+    is rejected.
     """
     return _model.hours(_exact(x))
 
@@ -92,8 +96,19 @@ def days(x: int | str | Decimal | float) -> TimeQty:
 
 def _exact(x: int | str | Decimal | float) -> int | str | Decimal:
     if isinstance(x, float):
-        return Decimal(repr(x))
+        text = repr(x)
+        _, _, frac = text.partition(".")
+        if not _FLOAT_LITERAL.fullmatch(text) or len(frac) > 6:
+            raise TypeError(
+                f"float {text} is not a short decimal literal (at most 6 decimal places, "
+                f"no exponent); pass a string such as {_suggest(x)!r} instead"
+            )
+        return Decimal(text)
     return x
+
+
+def _suggest(x: float) -> str:
+    return format(x, ".6f").rstrip("0").rstrip(".") if x == x and abs(x) < 1e15 else str(x)
 
 
 __all__ = [

@@ -29,7 +29,9 @@ def _terminating_part(n: int) -> int:
     return g
 
 
-@given(mpd=minutes_per_day, k=st.integers(min_value=-(10**7), max_value=10**7))
+@given(
+    mpd=minutes_per_day, k=st.integers(min_value=-36600, max_value=36600)
+)  # |x| within the TimeQty bound
 def test_days_round_trip_when_whole_minutes(mpd: int, k: int) -> None:
     # Every exact decimal x with x * mpd whole is k / g with g = the 2**a * 5**b part of mpd
     # (its reduced denominator divides mpd and has only factors 2 and 5).

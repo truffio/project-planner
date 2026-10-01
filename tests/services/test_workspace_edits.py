@@ -49,8 +49,8 @@ def ws(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Workspace]:
 
 def assert_synced(ws: Workspace) -> None:
     """The cached project equals what the database holds, and so does the revision."""
-    assert repo.load_project(ws.connection, ws.project_pk) == ws.project()
-    record = repo.get_project_record(ws.connection, ws.project_pk)
+    assert repo.load_project(ws._connection, ws._project_pk) == ws.project()
+    record = repo.get_project_record(ws._connection, ws._project_pk)
     assert record.revision == ws.state().revision
 
 
@@ -138,7 +138,7 @@ def test_new_project_invalid_leaves_workspace_untouched(ws: Workspace) -> None:
 
 def test_new_project_resets_revision_monotonically_and_drops_results(ws: Workspace) -> None:
     t = ws.add_task("x", duration="1d")
-    ws.store_result(schedule(ws.project()))
+    ws._store_result(schedule(ws.project()))
     rev = ws.state().revision
     ws.new_project("Other", START, discard_unsaved=True)
     assert ws.state().revision > rev
@@ -237,11 +237,11 @@ def test_add_operations_return_readable_sequential_ids(ws: Workspace) -> None:
 
 def test_ids_skip_existing_numbers(ws: Workspace) -> None:
     ws.new_project("Imported", START, discard_unsaved=True)
-    ws.connection.execute(
+    ws._connection.execute(
         "INSERT INTO wbs_nodes VALUES (?, 't7', 'x', 'task', NULL, 0, 'none', NULL, NULL)",
-        (ws.project_pk,),
+        (ws._project_pk,),
     )
-    ws.reload()
+    ws._reload()
     assert ws.add_task("next") == "t8"
 
 
@@ -326,7 +326,7 @@ def test_assignment_upsert_updates_the_existing_pair(ws: Workspace) -> None:
     ws.set_assignment(t, r, 30)
     ws.set_assignment(t, r, "45.5")
     assert [(a.key, a.percent) for a in ws.project().assignments] == [((t, r), Decimal("45.5"))]
-    rows = ws.connection.execute("SELECT percent FROM assignments").fetchall()
+    rows = ws._connection.execute("SELECT percent FROM assignments").fetchall()
     assert rows == [("45.5",)]
     ws.remove_assignment(t, r)
     assert ws.project().assignments == ()
@@ -418,7 +418,7 @@ def test_project_setting_rejections(ws: Workspace) -> None:
 def test_rename_project_updates_row_name(ws: Workspace) -> None:
     ws.rename_project("Brand new")
     assert ws.project().name == "Brand new"
-    assert repo.get_project_record(ws.connection, ws.project_pk).name == "Brand new"
+    assert repo.get_project_record(ws._connection, ws._project_pk).name == "Brand new"
 
 
 # --- node structure -----------------------------------------------------------
@@ -461,9 +461,9 @@ def test_move_and_reorder(ws: Workspace, plan: dict[str, str]) -> None:
 
 def test_move_updates_only_changed_rows(ws: Workspace, plan: dict[str, str]) -> None:
     statements: list[str] = []
-    ws.connection.set_trace_callback(statements.append)
+    ws._connection.set_trace_callback(statements.append)
     ws.move_node(plan["t3"], None, 0)
-    ws.connection.set_trace_callback(None)
+    ws._connection.set_trace_callback(None)
     updates = [s for s in statements if s.startswith("UPDATE wbs_nodes")]
     assert 1 <= len(updates) <= 4
 
@@ -614,14 +614,14 @@ def test_database_constraint_failure_surfaces_as_conflict_and_changes_nothing(
 ) -> None:
     before, rev = ws.project(), ws.state().revision
     # sneak a row in behind the service's back so the next insert violates the key
-    ws.connection.execute(
+    ws._connection.execute(
         "INSERT INTO wbs_nodes VALUES (?, 't9', 'ghost', 'task', NULL, 0, 'none', NULL, NULL)",
-        (ws.project_pk,),
+        (ws._project_pk,),
     )
     ws._ids.note("t8")  # force the allocator onto the colliding id
     with pytest.raises(Conflict):
         ws.add_task("collides")
-    ws.connection.execute("DELETE FROM wbs_nodes WHERE id = 't9'")
+    ws._connection.execute("DELETE FROM wbs_nodes WHERE id = 't9'")
     assert (ws.project(), ws.state().revision) == (before, rev)
     assert_synced(ws)
 
@@ -751,7 +751,7 @@ def test_state_transitions(ws: Workspace) -> None:
     ws.set_assignment(t, alice, 100)
     assert ws.state().dirty and not ws.state().stale_dates  # no result yet
 
-    ws.store_result(schedule(ws.project()))
+    ws._store_result(schedule(ws.project()))
     st = ws.state()
     assert (st.has_result, st.stale_dates, st.stale_costs, st.has_preview) == (
         True,
@@ -793,7 +793,7 @@ def test_recost_is_persisted_and_survives_reopen(tmp_path: Path) -> None:
         r = w.add_resource("R", "100")
         t = w.add_task("A", duration="1d")
         w.set_assignment(t, r, 100)
-        w.store_result(schedule(w.project()))
+        w._store_result(schedule(w.project()))
         w.set_hourly_rate(r, "200")
         expected = w.result()
     with open_workspace(path) as w2:
@@ -828,7 +828,7 @@ def test_staleness_rules(
     ids = {"t": ws.add_task("A", duration="2d"), "u": ws.add_task("B", duration="1d")}
     ids["r"] = ws.add_resource("R", "10")
     ws.set_assignment(ids["t"], ids["r"], 100)
-    ws.store_result(schedule(ws.project()))
+    ws._store_result(schedule(ws.project()))
     assert not ws.state().stale_dates
     edit(ws, ids)
     assert ws.state().stale_dates is stales
@@ -839,7 +839,7 @@ def test_report_unit_change_refreshes_stored_views(ws: Workspace) -> None:
     r = ws.add_resource("R", "100")
     t = ws.add_task("A", duration="1d")
     ws.set_assignment(t, r, 100)
-    ws.store_result(schedule(ws.project()))
+    ws._store_result(schedule(ws.project()))
     first = ws.result()
     assert first is not None and first.work_unit == "person_days"
     ws.set_cost_report_unit("person_hours")
@@ -851,24 +851,29 @@ def test_report_unit_change_refreshes_stored_views(ws: Workspace) -> None:
     assert not ws.state().stale_dates
 
 
-def test_store_result_does_not_bump_revision_and_emits(ws: Workspace) -> None:
+def test_store_result_does_not_bump_revision_but_makes_dirty_and_emits(ws: Workspace) -> None:
     ws.add_task("A", duration="1d")
+    ws._mark_clean()
     events = collect(ws)
     rev = ws.state().revision
-    ws.store_result(schedule(ws.project()))
+    ws._store_result(schedule(ws.project()))
     assert ws.state().revision == rev
+    assert ws.state().dirty is True  # stored results are unsaved work too (G1)
     assert [(e.kind, e.revision) for e in events] == [(EventKind.RESULT_STORED, rev)]
+    ws._mark_clean()
+    ws._discard_results()
+    assert ws.state().dirty is True
 
 
 def test_dirty_follows_mark_clean(ws: Workspace) -> None:
     ws.add_task("A")
     assert ws.state().dirty
-    ws.mark_clean()
+    ws._mark_clean()
     assert not ws.state().dirty
     with pytest.raises(UnsavedChanges):
         ws.add_task("B")
-        ws.require_clean()
-    ws.require_clean(discard_unsaved=True)
+        ws._require_clean()
+    ws._require_clean(discard_unsaved=True)
 
 
 def test_unsubscribe_and_failing_callbacks(ws: Workspace) -> None:
@@ -963,7 +968,7 @@ def test_delete_resource_through_preview_and_directly(ws: Workspace, plan: dict[
 
 
 def test_deleting_marks_results_stale(ws: Workspace, plan: dict[str, str]) -> None:
-    ws.store_result(schedule(ws.project()))
+    ws._store_result(schedule(ws.project()))
     ws.delete_commit(ws.delete_preview(plan["t3"]).token)
     assert ws.state().stale_dates
 
@@ -981,12 +986,12 @@ def test_edit_on_10k_task_project_writes_only_touched_rows(tmp_path: Path) -> No
         builder.task(f"t{i + 1}", duration="1d", parent="g1")
     big = builder.build()
     with open_workspace(tmp_path / "big.db") as w:
-        repo.save_project(w.connection, w.project_pk, big)
-        w.reload()
+        repo.save_project(w._connection, w._project_pk, big)
+        w._reload()
         assert len(w.project().nodes) == n + 1
 
         statements: list[str] = []
-        w.connection.set_trace_callback(statements.append)
+        w._connection.set_trace_callback(statements.append)
         started = time.perf_counter()
         w.set_sizing("t5000", effort="3d")
         w.rename_node("t7", "renamed")
@@ -994,7 +999,7 @@ def test_edit_on_10k_task_project_writes_only_touched_rows(tmp_path: Path) -> No
         w.add_dependency("t1", "t2")
         new_id = w.add_task("one more", "g1", duration="2d")
         elapsed = time.perf_counter() - started
-        w.connection.set_trace_callback(None)
+        w._connection.set_trace_callback(None)
 
         assert new_id == f"t{n + 1}"
         writes = [s for s in statements if s.split(None, 1)[0] in {"INSERT", "UPDATE", "DELETE"}]

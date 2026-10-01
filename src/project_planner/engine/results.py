@@ -15,6 +15,7 @@ from typing import Literal
 
 from project_planner.engine.cost import CostResult
 from project_planner.engine.errors import Issue, NotFound, ObjectType
+from project_planner.engine.frozen import freeze
 from project_planner.engine.leveling import LevelingDelay, UnresolvedOverload
 from project_planner.engine.loading import LoadSegment
 from project_planner.engine.model import NodeKind, TimeQty
@@ -159,6 +160,11 @@ class ScheduleResult:
     cost_fp: str
     minutes_per_day: int
 
+    def __post_init__(self) -> None:
+        # Read-only mappings: callers cannot corrupt a cached result (finding 11).
+        for name in ("nodes", "assignments", "dependencies", "loading"):
+            object.__setattr__(self, name, freeze(getattr(self, name)))
+
     @property
     def cost_total(self) -> Decimal:
         """Alias of ``total_cost``."""
@@ -199,3 +205,6 @@ class LevelingResult:
     delays: tuple[LevelingDelay, ...]
     unresolved: tuple[UnresolvedOverload, ...]
     finish_delta_days: Decimal | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "delays_days", freeze(self.delays_days))

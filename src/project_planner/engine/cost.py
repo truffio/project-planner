@@ -20,7 +20,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
-from project_planner.engine.config import DEFAULT_CONFIG, Config
+from project_planner.engine.config import DEFAULT_CONFIG, Config, engine_context
+from project_planner.engine.frozen import freeze
 from project_planner.engine.model import NodeKind, Project, WorkUnit
 
 _ZERO = Decimal(0)
@@ -68,7 +69,12 @@ class CostResult:
     missing_rate_resources: tuple[str, ...]
     total_hours: Decimal = _ZERO
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tasks", freeze(self.tasks))
+        object.__setattr__(self, "groups", freeze(self.groups))
 
+
+@engine_context
 def compute_costs(project: Project, durations: Mapping[str, int | None]) -> CostResult:
     """Compute exact (unrounded) costs.
 
@@ -189,7 +195,12 @@ class CostReport:
     complete: bool
     missing_rate_resources: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tasks", freeze(self.tasks))
+        object.__setattr__(self, "groups", freeze(self.groups))
 
+
+@engine_context
 def cost_report(
     costs: CostResult, project: Project, unit: WorkUnit | str | None = None
 ) -> CostReport:

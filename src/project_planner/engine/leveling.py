@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
-from project_planner.engine.config import DEFAULT_CONFIG, Config
+from project_planner.engine.config import DEFAULT_CONFIG, Config, engine_context
 from project_planner.engine.errors import Cancelled
 from project_planner.engine.forward_pass import NodeTiming
 from project_planner.engine.loading import compute_loading
@@ -147,6 +147,7 @@ class _Load:
         return i + 1
 
 
+@engine_context
 def level(
     project: Project,
     sizing: Mapping[str, TaskSizing],

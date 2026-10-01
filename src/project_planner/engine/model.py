@@ -38,6 +38,7 @@ Issue codes raised here
 ``TIME_INVALID``                   time text / number cannot be read, or not finite
 ``TIME_UNITLESS``                  time text has no unit (``"40"``)
 ``TIME_BAD_UNIT``                  unit is not ``h``/``hours``/``d``/``days``
+``TIME_OUT_OF_RANGE``              ``|value|`` above 100 years (36600 days / 878400 hours)
 ``CAL_BAD_VALUE``                  calendar argument of the wrong form / type
 ``CAL_HOURS_PER_DAY_RANGE``        ``hours_per_day`` not in ``(0, 24]``
 ``CAL_HOURS_PER_DAY_PRECISION``    ``hours_per_day * 60`` is not a whole number
@@ -102,6 +103,9 @@ __all__ = [
 _E = TypeVar("_E", bound=StrEnum)
 
 MINUTES_PER_HOUR = 60
+MAX_TIME_YEARS = 100
+MAX_TIME_DAYS = MAX_TIME_YEARS * 366
+"""Largest accepted ``|TimeQty|`` in days (hours: 24 times this): about 100 years."""
 _MINUTES_PER_CALENDAR_DAY = 24 * 60
 
 
@@ -177,6 +181,7 @@ class WorkUnit(StrEnum):
     PERSON_DAYS = "person_days"
     PERSON_YEARS = "person_years"
 
+    @_cfg.engine_context
     def hours_per_unit(self, calendar: Calendar) -> Decimal:
         """Hours in one unit: 1, ``hours_per_day``, or ``hours_per_day * working_days_per_year``."""
         if self is WorkUnit.PERSON_HOURS:
@@ -411,6 +416,14 @@ class TimeQty:
                 raise TypeError(
                     f"unit must be a TimeUnit ('hours'/'days'), got {self.unit!r}"
                 ) from None
+        limit = MAX_TIME_DAYS if self.unit is TimeUnit.DAYS else MAX_TIME_DAYS * 24
+        if value.copy_abs() > limit:
+            _fail(
+                "TIME_OUT_OF_RANGE",
+                f"time quantity {value}{self.unit.symbol} is out of range "
+                f"(at most {limit}{self.unit.symbol}, "
+                f"about {MAX_TIME_YEARS} years of working time)",
+            )
 
     def __str__(self) -> str:
         return f"{self.value}{self.unit.symbol}"
@@ -586,6 +599,7 @@ def as_time_qty(
     )
 
 
+@_cfg.engine_context
 def minutes_to_days(minutes: int, minutes_per_day: int) -> Decimal:
     """Working minutes as working days: ``Decimal(minutes) / Decimal(minutes_per_day)``.
 
@@ -896,6 +910,23 @@ def _calendar_raw(obj: Any) -> dict[str, Any]:
     return {name: getattr(obj, name) for name in _CAL_FIELDS}
 
 
+def _calendar_repr(obj: Any) -> str:
+    """``repr`` of a calendar-like dataclass with weekdays Monday first (stable across runs)."""
+    parts: list[str] = []
+    for name in _CAL_FIELDS:
+        value = getattr(obj, name)
+        if name == "working_weekdays" and isinstance(value, frozenset):
+            try:
+                ordered = Weekday.ordered(value)
+            except (TypeError, KeyError):  # invalid, unnormalised input: fall back
+                ordered = tuple(value)
+            text = "frozenset({" + ", ".join(repr(w) for w in ordered) + "})"
+        else:
+            text = repr(value)
+        parts.append(f"{name}={text}")
+    return f"{type(obj).__name__}({', '.join(parts)})"
+
+
 @dataclass(frozen=True, slots=True)
 class Calendar:
     """A project's validated working calendar (plan 2.3). Always valid once constructed.
@@ -926,6 +957,9 @@ class Calendar:
     workday_start: dt.time = _cfg.DEFAULT_WORKDAY_START
     holidays: tuple[Holiday, ...] = ()
     exceptions: tuple[CalendarException, ...] = ()
+
+    def __repr__(self) -> str:
+        return _calendar_repr(self)
 
     def __post_init__(self) -> None:
         values, issues = _check_calendar(_calendar_raw(self))
@@ -975,6 +1009,9 @@ class CalendarSettings:
     _issues: tuple[Issue, ...] = field(
         default=(), init=False, repr=False, compare=False, hash=False
     )
+
+    def __repr__(self) -> str:
+        return _calendar_repr(self)
 
     def __post_init__(self) -> None:
         values, issues = _check_calendar(_calendar_raw(self))

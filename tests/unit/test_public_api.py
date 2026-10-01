@@ -193,3 +193,31 @@ def test_to_dataframe_with_pandas() -> None:
     ws, _ = _build_demo()
     frame = ws.schedule().to_dataframe()  # type: ignore[attr-defined]
     assert list(frame["name"]) == ["Design", "Build"]
+
+
+def test_workspace_public_surface_has_no_plumbing() -> None:
+    """Finding 16: service plumbing is underscore-prefixed; ``config`` is read-only."""
+    public = {n for n in dir(pp.Workspace) if not n.startswith("_")}
+    plumbing = {
+        "store_result",
+        "discard_results",
+        "mark_clean",
+        "reload",
+        "require_clean",
+        "connection",
+        "results",
+        "project_pk",
+        "events",
+    }
+    assert not public & plumbing
+    assert {"state", "result", "dirty", "config", "subscribe", "load", "save"} <= public
+    with pp.open_workspace() as ws, pytest.raises(AttributeError):
+        ws.config = pp.Config()  # type: ignore[misc]
+
+
+def test_project_info_accepted_by_load_and_delete(tmp_path: Path) -> None:
+    with pp.open_workspace(tmp_path / "p.db") as ws:
+        info = ws.save_as("first")
+        ws.load(info)
+        ws.delete_project(info)
+        assert ws.list_projects() == []

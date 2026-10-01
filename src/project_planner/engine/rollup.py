@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
+from project_planner.engine.config import engine_context
 from project_planner.engine.model import NodeKind, Project, WbsNode
 
 __all__ = ["GroupSummary", "rollup", "wbs_numbers"]
@@ -76,6 +77,7 @@ def wbs_numbers(project: Project) -> dict[str, str]:
     return numbers
 
 
+@engine_context
 def rollup(
     project: Project,
     intervals: Mapping[str, tuple[int, int] | None],

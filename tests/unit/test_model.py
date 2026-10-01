@@ -476,9 +476,7 @@ def test_to_minutes_is_exact_beyond_context_precision() -> None:
     tiny = D("1E-30")  # 60 * tiny is far below one minute but positive
     assert hours(tiny).to_minutes(480) == 1
     assert hours(-tiny).to_minutes(480) == 0
-    assert days(D("12345678901234567890.123456789")).to_minutes(480) == (
-        12345678901234567890 * 480 + 60
-    )
+    assert days(D("12345.123456789")).to_minutes(480) == 12345 * 480 + 60
 
 
 def test_cross_field_rule_with_other_errors() -> None:
@@ -917,7 +915,10 @@ def test_config_defaults_and_constants() -> None:
     assert config.Config(max_assignment_percent=D(200)).max_assignment_percent == 200
     with pytest.raises(ValueError):
         config.Config(max_assignment_percent=D(0))
-    with pytest.raises(TypeError):
-        config.Config(max_assignment_percent=100)  # type: ignore[arg-type]
+    assert config.Config(max_assignment_percent=200).max_assignment_percent == D(200)  # type: ignore[arg-type]
+    assert config.Config(max_assignment_percent="150").max_assignment_percent == D(150)  # type: ignore[arg-type]
+    for bad in (1.5, True):
+        with pytest.raises(TypeError):
+            config.Config(max_assignment_percent=bad)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         config.Config(days_display_decimals=-1)

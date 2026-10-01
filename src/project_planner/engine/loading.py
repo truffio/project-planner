@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Literal
 
 from project_planner.engine.calendar import WorkingAxis
+from project_planner.engine.config import engine_context
 from project_planner.engine.model import Project
 
 __all__ = [
@@ -57,6 +58,7 @@ class LoadBucket:
     peak_percent: Decimal
 
 
+@engine_context
 def compute_loading(
     project: Project, intervals: Mapping[str, tuple[int, int] | None]
 ) -> dict[str, tuple[LoadSegment, ...]]:
@@ -121,6 +123,7 @@ def overloads(loading: Mapping[str, Iterable[LoadSegment]]) -> list[LoadSegment]
     return [seg for rid in sorted(loading) for seg in loading[rid] if seg.overloaded]
 
 
+@engine_context
 def aggregate(
     segments: Iterable[LoadSegment],
     axis: WorkingAxis,

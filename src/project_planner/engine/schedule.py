@@ -18,14 +18,16 @@ Conventions chosen here:
 
 from __future__ import annotations
 
+import bisect
+import contextlib
 import dataclasses
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
 from project_planner.engine.calendar import WorkingAxis
-from project_planner.engine.config import DEFAULT_CONFIG, Config
+from project_planner.engine.config import DEFAULT_CONFIG, Config, engine_context
 from project_planner.engine.cost import CostReport, CostResult, compute_costs
 from project_planner.engine.cost import cost_report as _cost_report
 from project_planner.engine.errors import Conflict, Issue, Severity, ValidationFailed
@@ -48,7 +50,7 @@ from project_planner.engine.results import (
 )
 from project_planner.engine.rollup import rollup, wbs_numbers
 from project_planner.engine.sizing import TaskSizing, compute_sizing
-from project_planner.engine.validation import validate
+from project_planner.engine.validation import issue_sort_key, missing_rate_issues, validate
 
 __all__ = ["assemble", "cost_report", "level", "recost", "schedule", "with_kind"]
 
@@ -107,6 +109,31 @@ def _dedupe(issues: list[Issue]) -> tuple[Issue, ...]:
         else:
             out.append(i)
     return tuple(out)
+
+
+@contextlib.contextmanager
+def _range_guard() -> Iterator[None]:
+    """Turn calendar-range failures into ``ValidationFailed`` (finding 12)."""
+    try:
+        yield
+    except OverflowError as exc:
+        raise _out_of_range(str(exc)) from None
+    except ValueError as exc:
+        if "out of range" not in str(exc) and "ordinal" not in str(exc):
+            raise
+        raise _out_of_range(str(exc)) from None
+
+
+def _out_of_range(detail: str) -> ValidationFailed:
+    return ValidationFailed(
+        [
+            Issue.error(
+                "TIME_OUT_OF_RANGE",
+                f"the schedule runs past the supported calendar range ({detail}); "
+                "reduce durations, efforts or lags",
+            )
+        ]
+    )
 
 
 def _days(minutes: int | Decimal | None, mpd: int) -> Decimal | None:
@@ -366,6 +393,7 @@ def _fill_reasons(
     return out
 
 
+@engine_context
 def assemble(
     project: Project,
     timings: Mapping[str, NodeTiming],
@@ -390,6 +418,18 @@ def assemble(
     be displayed against an edited project (the fingerprints then describe the
     current project; callers that keep the stored ones should replace them).
     """
+    with _range_guard():
+        return _assemble_restored(project, timings, kind, delays, issues, config)
+
+
+def _assemble_restored(
+    project: Project,
+    timings: Mapping[str, NodeTiming],
+    kind: ResultKind,
+    delays: Mapping[str, int] | Iterable[LevelingDelay],
+    issues: Iterable[Issue],
+    config: Config,
+) -> ScheduleResult:
     ctx = _Restored(project, tuple(issues))
     fixed: dict[str, NodeTiming] = {}
     for n in project.nodes:
@@ -407,6 +447,7 @@ def assemble(
     return _assemble(project, ctx, fixed, kind, delay_minutes, config)
 
 
+@engine_context
 def schedule(project: Project, config: Config = DEFAULT_CONFIG) -> ScheduleResult:
     """Dependency-only schedule (kind ``dependency_only``).
 
@@ -414,10 +455,12 @@ def schedule(project: Project, config: Config = DEFAULT_CONFIG) -> ScheduleResul
         ValidationFailed: on any structural error (cycles, dangling references...).
             Unsized or capacity-less tasks do not raise; they yield an incomplete result.
     """
-    prep = _Prepared(project, config)
-    return _assemble(project, prep, prep.base, "dependency_only", {}, config)
+    with _range_guard():
+        prep = _Prepared(project, config)
+        return _assemble(project, prep, prep.base, "dependency_only", {}, config)
 
 
+@engine_context
 def level(
     project: Project,
     base: ScheduleResult,
@@ -434,18 +477,21 @@ def level(
     """
     if base.schedule_fp != schedule_fp(project):
         raise Conflict("base schedule is stale")
-    prep = _Prepared(project, config)
-    outcome: LevelingOutcome = _level(
-        project,
-        prep.sizing,
-        prep.base,
-        minutes_per_day=prep.mpd,
-        config=config,
-        progress=progress,
-        cancel=cancel,
-    )
-    delay_minutes = {d.task_id: d.minutes for d in outcome.delays}
-    result = _assemble(project, prep, outcome.timings, "leveling_preview", delay_minutes, config)
+    with _range_guard():
+        prep = _Prepared(project, config)
+        outcome: LevelingOutcome = _level(
+            project,
+            prep.sizing,
+            prep.base,
+            minutes_per_day=prep.mpd,
+            config=config,
+            progress=progress,
+            cancel=cancel,
+        )
+        delay_minutes = {d.task_id: d.minutes for d in outcome.delays}
+        result = _assemble(
+            project, prep, outcome.timings, "leveling_preview", delay_minutes, config
+        )
     return LevelingResult(
         result=result,
         delays_days={tid: Decimal(m) / prep.mpd for tid, m in delay_minutes.items()},
@@ -460,6 +506,7 @@ def with_kind(result: ScheduleResult, kind: ResultKind) -> ScheduleResult:
     return dataclasses.replace(result, kind=kind)
 
 
+@engine_context
 def recost(result: ScheduleResult, project: Project) -> ScheduleResult:
     """Refresh costs after a rate-only edit; dates are kept untouched.
 
@@ -481,14 +528,39 @@ def recost(result: ScheduleResult, project: Project) -> ScheduleResult:
         else:
             t = costs.tasks[nid]
             nodes[nid] = dataclasses.replace(row, cost=t.cost, cost_complete=t.cost_complete)
+    issues = _refresh_rate_issues(result.issues, project)
     return dataclasses.replace(
         result,
         nodes=nodes,
+        issues=issues,
         cost_fp=cost_fp(project),
-        **_cost_views(project, nodes, costs, result.issues, mpd),
+        **_cost_views(project, nodes, costs, issues, mpd),
     )
 
 
+def _refresh_rate_issues(issues: tuple[Issue, ...], project: Project) -> tuple[Issue, ...]:
+    """Replace the ``COST_MISSING_RATE`` issues by the current ones (finding 9).
+
+    The new issues are inserted where :func:`validate` would have sorted them (inside
+    the leading validation block of ``issues``), so the outcome equals a fresh schedule.
+    """
+    kept = [i for i in issues if i.code != "COST_MISSING_RATE"]
+    new = missing_rate_issues(project)
+    if not new and len(kept) == len(issues):
+        return issues
+    block = 0  # length of the leading run that is in validate() order
+    while block < len(kept) and (
+        block == 0 or issue_sort_key(kept[block - 1]) <= issue_sort_key(kept[block])
+    ):
+        block += 1
+    for issue in new:
+        pos = bisect.bisect_right([issue_sort_key(i) for i in kept[:block]], issue_sort_key(issue))
+        kept.insert(pos, issue)
+        block += 1
+    return tuple(kept)
+
+
+@engine_context
 def cost_report(
     result: ScheduleResult, project: Project, unit: WorkUnit | str | None = None
 ) -> CostReport:

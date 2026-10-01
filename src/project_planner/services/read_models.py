@@ -32,7 +32,7 @@ from typing import Literal
 
 from project_planner.engine.calendar import WorkingAxis
 from project_planner.engine.cost import AssignmentCost
-from project_planner.engine.errors import Conflict, NotFound, ObjectType
+from project_planner.engine.errors import Conflict, Issue, NotFound, ObjectType, ValidationFailed
 from project_planner.engine.loading import LoadSegment, aggregate
 from project_planner.engine.model import (
     CalendarSettings,
@@ -205,6 +205,27 @@ def _assignment_row(a: AssignmentCost, unit: WorkUnit, per: Decimal) -> CostRepo
     )
 
 
+def _report_unit(project: Project, unit: WorkUnit | str | None) -> WorkUnit:
+    """``unit`` as a ``WorkUnit`` (default: the project's); ``ValidationFailed`` otherwise."""
+    if unit is None:
+        return project.cost_report_unit
+    try:
+        return WorkUnit(unit)
+    except ValueError:
+        allowed = ", ".join(u.value for u in WorkUnit)
+        raise ValidationFailed(
+            [
+                Issue.error(
+                    "COST_BAD_UNIT",
+                    f"unit {unit!r} is not one of: {allowed}",
+                    object_type=ObjectType.PROJECT,
+                    object_id=project.id,
+                    field="unit",
+                )
+            ]
+        ) from None
+
+
 def cost_report(ws: Workspace, unit: WorkUnit | str | None = None) -> CostReportView:
     """Cost report in ``unit`` (default: the project's ``cost_report_unit``).
 
@@ -212,13 +233,14 @@ def cost_report(ws: Workspace, unit: WorkUnit | str | None = None) -> CostReport
 
     Raises:
         Conflict: ``"no schedule calculated"`` when no result is stored.
+        ValidationFailed: ``COST_BAD_UNIT`` for an unknown ``unit``.
     """
     idx = _index(ws)
     result = idx.result
     if result is None:
         raise Conflict("no schedule calculated")
     project = idx.project
-    u = project.cost_report_unit if unit is None else WorkUnit(unit)
+    u = _report_unit(project, unit)
     per = u.hours_per_unit(project.calendar)
     costs = result.costs
     rows: list[CostNodeRow] = []
@@ -325,11 +347,11 @@ def _lag_days(
 
 
 def task_details(ws: Workspace, task_id: str, unit: WorkUnit | str | None = None) -> TaskDetails:
-    """Details of one node.  Raises ``NotFound`` for an unknown ID."""
+    """Details of one node.  Raises ``NotFound`` (unknown ID), ``ValidationFailed`` (bad unit)."""
     idx = _index(ws)
     project, result = idx.project, idx.result
     node = project.node(_id_of(task_id))
-    u = project.cost_report_unit if unit is None else WorkUnit(unit)
+    u = _report_unit(project, unit)
     per = u.hours_per_unit(project.calendar)
     nr = result.nodes.get(node.id) if result is not None else None
 

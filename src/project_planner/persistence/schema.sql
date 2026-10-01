@@ -1,4 +1,6 @@
--- Schema version 1. All IDs are TEXT, Decimals are exact TEXT, dates are ISO TEXT.
+-- Schema version 1 (frozen: the DDL v1 databases were created with). Later versions are
+-- applied on top by migrations.py (v2: AUTOINCREMENT projects + results generation).
+-- All IDs are TEXT, Decimals are exact TEXT, dates are ISO TEXT.
 
 CREATE TABLE projects (
     pk                 INTEGER PRIMARY KEY,

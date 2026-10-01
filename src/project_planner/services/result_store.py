@@ -16,8 +16,9 @@ every stored run (leveling was based on the old schedule); a ``leveled`` result
 replaces the ``leveled`` run and drops the preview it was applied from; a
 ``leveling_preview`` replaces the previous preview.
 
-Compute services (T32) call ``Workspace.store_result`` /
-``Workspace.discard_results``, which delegate here.
+Compute services (T32) call ``Workspace._store_result`` /
+``Workspace._discard_results`` (internal; they also bump the results generation),
+which delegate here.
 """
 
 from __future__ import annotations

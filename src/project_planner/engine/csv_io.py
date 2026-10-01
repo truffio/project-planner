@@ -59,8 +59,9 @@ writes an empty cell.
   ``rate_per_unit``, ``cost`` (all ``Decimal | None``), ``work_unit: str | None``,
   ``cost_complete: bool``.
 
-``RESULT_PROJECT.schedule_status`` is ``stale`` when ``stale=True`` (takes precedence),
-else ``incomplete`` when ``result.complete`` is false, else ``current``. Nodes and
+``RESULT_PROJECT.schedule_status`` is ``stale`` when ``stale=True`` (``stale_incomplete``
+if the result is also incomplete), else ``incomplete`` when ``result.complete`` is false,
+else ``current``. Nodes and
 assignments of the project without a result row get ``unscheduled`` /
 empty-valued rows with ``cost_complete=false``.
 """
@@ -75,7 +76,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Protocol, TextIO, TypeVar
 
 from project_planner.engine import config as _cfg
-from project_planner.engine.config import DEFAULT_CONFIG
+from project_planner.engine.config import DEFAULT_CONFIG, Config, engine_context
 from project_planner.engine.errors import ImportFailed, Issue, Severity
 from project_planner.engine.model import (
     Assignment,
@@ -338,6 +339,25 @@ def _trim(value: str) -> str:
     return value.strip(" \t")
 
 
+_TEXT_COLUMNS = frozenset(
+    {"name", "id", "parent_id", "task_id", "resource_id", "pred_id", "succ_id"}
+)
+"""Free-text columns, subject to the formula-injection escape (csv_format section 3.1)."""
+
+_FORMULA_START = re.compile(r"'*[=+\-@\t\r]")
+_ESCAPED = re.compile(r"'+[=+\-@\t\r]")
+
+
+def _unescape(cell: str) -> str:
+    """Undo :func:`_escape`: drop one leading ``'`` in front of a formula character."""
+    return cell[1:] if _ESCAPED.match(cell) else cell
+
+
+def _escape(cell: str) -> str:
+    """Neutralise spreadsheet formulas: prefix ``'`` when the cell would start one."""
+    return "'" + cell if _FORMULA_START.match(cell) else cell
+
+
 # =============================================================================
 # Import: parsed rows
 # =============================================================================
@@ -431,6 +451,7 @@ class _State:
     seen_types: set[str] = field(default_factory=set)
     result_counts: dict[str, int] = field(default_factory=dict)
     first_result_line: int | None = None
+    config: Config = DEFAULT_CONFIG
 
 
 def _err(
@@ -760,10 +781,11 @@ def _parse_assignment(st: _State, row: _Row) -> None:
     percent: Decimal | None = None
     if row.c["percent"]:
         percent = _p_decimal(st, row, "percent", negative=True)
-        if percent is not None and not 0 < percent <= _cfg.MAX_ASSIGNMENT_PERCENT:
+        limit = st.config.max_assignment_percent
+        if percent is not None and not 0 < percent <= limit:
             _err(
                 st, row, "CSV_OUT_OF_RANGE", "percent",
-                f"percent {row.c['percent']} must be > 0 and <= {_cfg.MAX_ASSIGNMENT_PERCENT}",
+                f"percent {row.c['percent']} must be > 0 and <= {limit}",
             )  # fmt: skip
             percent = None
     if task is not None and res is not None and percent is not None and len(st.errors) == before:
@@ -833,12 +855,14 @@ def _read_text(source: TextIO | str | bytes) -> tuple[str | None, list[Issue]]:
     return text, []
 
 
-def parse(source: TextIO | str | bytes) -> ImportOutcome:
+@engine_context
+def parse(source: TextIO | str | bytes, *, config: Config = DEFAULT_CONFIG) -> ImportOutcome:
     """Parse CSV text (``docs/csv_format.md``) into a project.
 
     Args:
         source: The whole file as ``str``, UTF-8 ``bytes`` or a readable text stream.
             A leading BOM is accepted and stripped.
+        config: Limits to validate against (``max_assignment_percent``).
 
     Returns:
         :class:`ImportOutcome` with the project and informational notes.
@@ -850,7 +874,7 @@ def parse(source: TextIO | str | bytes) -> ImportOutcome:
     text, enc_errors = _read_text(source)
     if text is None:
         raise ImportFailed(enc_errors)
-    st = _State()
+    st = _State(config=config)
     stop = _phase1(st, text)
     if stop:
         raise ImportFailed(st.errors)
@@ -932,7 +956,8 @@ def _phase1(st: _State, text: str) -> bool:
             continue
         c = {col: "" for col in COLUMNS}
         for col, i in index.items():
-            c[col] = cells[i] if col == "name" else _trim(cells[i])
+            raw = cells[i] if col == "name" else _trim(cells[i])
+            c[col] = _unescape(raw) if col in _TEXT_COLUMNS else raw
         rt = c["record_type"]
         version = c["schema_version"]
         if version not in ("", SCHEMA_VERSION):
@@ -1062,7 +1087,6 @@ def _phase2(st: _State) -> Project | None:  # noqa: C901 - one linear pipeline
     for rt, code in (
         ("PROJECT", "CSV_MISSING_PROJECT"),
         ("CALENDAR", "CSV_MISSING_CALENDAR"),
-        ("NODE", "CSV_MISSING_NODE"),
     ):
         if rt not in st.seen_types:
             _model_err(st, rt, 1, code, "record_type", f"the file has no {rt} record", None)
@@ -1169,7 +1193,7 @@ def _phase2(st: _State) -> Project | None:  # noqa: C901 - one linear pipeline
     )
 
     # --- engine validation, mapped to CSV codes ------------------------------------------
-    for issue in validate(project, DEFAULT_CONFIG):
+    for issue in validate(project, st.config):
         if issue.severity is not Severity.ERROR:
             continue
         oid = issue.object_id or ""
@@ -1330,12 +1354,15 @@ def _num(x: Decimal | int) -> str:
     return format(Decimal(x), "f")
 
 
-def _days(x: Decimal | int | None) -> str:
-    return "" if x is None else format(DEFAULT_CONFIG.round_days(Decimal(x)), "f")
+def _days(x: Decimal | int | None, config: Config = DEFAULT_CONFIG) -> str:
+    return "" if x is None else format(config.round_days(Decimal(x)), "f")
 
 
-def _money(x: Decimal | int | None) -> str:
-    return "" if x is None else format(DEFAULT_CONFIG.round_money(Decimal(x)), "f")
+def _money(x: Decimal | int | None, config: Config = DEFAULT_CONFIG) -> str:
+    return "" if x is None else format(config.round_money(Decimal(x)), "f")
+
+
+_days_cfg, _money_cfg = _days, _money
 
 
 def _qty(x: Decimal | int | None) -> str:
@@ -1345,11 +1372,14 @@ def _qty(x: Decimal | int | None) -> str:
     return s.rstrip("0").rstrip(".") if "." in s else s
 
 
-def _calendar_days(x: Decimal | int | None) -> str:
+def _calendar_days(x: Decimal | int | None, config: Config = DEFAULT_CONFIG) -> str:
     if x is None:
         return ""
     d = Decimal(x)
-    return str(int(d)) if d == d.to_integral_value() else _days(d)
+    return str(int(d)) if d == d.to_integral_value() else _days(d, config)
+
+
+_calendar_days_cfg = _calendar_days
 
 
 def _dtm(x: dt.datetime | None) -> str:
@@ -1372,7 +1402,13 @@ def _line(rt: str, **cells: str) -> str:
     unknown = set(cells) - set(COLUMNS)
     assert not unknown, unknown
     out = {"record_type": rt, "schema_version": SCHEMA_VERSION, **cells}
-    return ",".join(_quote(out.get(col, "")) for col in COLUMNS) + "\n"
+    return (
+        ",".join(
+            _quote(_escape(out.get(col, "")) if col in _TEXT_COLUMNS else out.get(col, ""))
+            for col in COLUMNS
+        )
+        + "\n"
+    )
 
 
 def _node_order(project: Project) -> list[WbsNode]:
@@ -1382,7 +1418,14 @@ def _node_order(project: Project) -> list[WbsNode]:
     return ordered
 
 
-def export(project: Project, result: ExportableResult | None = None, *, stale: bool = False) -> str:
+@engine_context
+def export(
+    project: Project,
+    result: ExportableResult | None = None,
+    *,
+    stale: bool = False,
+    config: Config = DEFAULT_CONFIG,
+) -> str:
     """Write ``project`` (and optionally a schedule result) as CSV text.
 
     Every node is written regardless of any UI state. Output is deterministic
@@ -1393,7 +1436,11 @@ def export(project: Project, result: ExportableResult | None = None, *, stale: b
         result: A result matching :class:`ExportableResult`, or ``None`` for none (then
             no ``RESULT_*`` record is written).
         stale: The result is out of date with respect to ``project``; then
-            ``RESULT_PROJECT.schedule_status`` is ``stale``. Ignored without a result.
+            ``RESULT_PROJECT.schedule_status`` is ``stale`` (``stale_incomplete`` if the
+            result is also incomplete). Ignored without a result.
+        config: Rounding of day and money values (``days_display_decimals``,
+            ``money_display_decimals``, rounding modes); ``work_qty`` and
+            ``rate_per_unit`` keep up to 6 decimals (decision D13).
     """
     out: list[str] = [",".join(COLUMNS) + "\n"]
     out.append(
@@ -1474,7 +1521,7 @@ def export(project: Project, result: ExportableResult | None = None, *, stale: b
             )  # fmt: skip
         )
     if result is not None:
-        out.extend(_result_lines(project, nodes, assignments, result, stale))
+        out.extend(_result_lines(project, nodes, assignments, result, stale, config))
     return "".join(out)
 
 
@@ -1484,8 +1531,21 @@ def _result_lines(
     assignments: list[Assignment],
     result: ExportableResult,
     stale: bool,
+    config: Config,
 ) -> list[str]:
-    status = "stale" if stale else ("current" if result.complete else "incomplete")
+    def _days(x: Decimal | int | None) -> str:
+        return _days_cfg(x, config)
+
+    def _money(x: Decimal | int | None) -> str:
+        return _money_cfg(x, config)
+
+    def _calendar_days(x: Decimal | int | None) -> str:
+        return _calendar_days_cfg(x, config)
+
+    if stale:
+        status = "stale" if result.complete else "stale_incomplete"
+    else:
+        status = "current" if result.complete else "incomplete"
     out = [
         _line(
             "RESULT_PROJECT",

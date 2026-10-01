@@ -43,6 +43,8 @@ class ProjectRecord:
     based_on_pk: int | None
     based_on_revision: int | None
     saved_at: str | None
+    results_gen: int = 0
+    based_on_results_gen: int = 0
 
 
 @dataclass(frozen=True, slots=True)

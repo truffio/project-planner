@@ -43,9 +43,9 @@ def build(ws: Workspace) -> None:
 
 def schedule_and_level(ws: Workspace) -> None:
     base = sched.schedule(ws.project(), ws.config)
-    ws.store_result(base)
+    ws._store_result(base)
     lev = sched.level(ws.project(), base, ws.config)
-    ws.store_result(sched.with_kind(lev.result, "leveled"))
+    ws._store_result(sched.with_kind(lev.result, "leveled"))
 
 
 def snapshot(ws: Workspace) -> tuple[Any, Any, Any]:
@@ -127,7 +127,7 @@ def test_list_newest_first_and_delete(ws: Workspace) -> None:
     with pytest.raises(NotFound):
         files.delete_project(ws, a.id)
     with pytest.raises(NotFound):
-        files.delete_project(ws, ws.project_pk)
+        files.delete_project(ws, ws._project_pk)
     # workspace untouched and still dirty-free
     assert ws.project().name == "Demo"
 
@@ -146,7 +146,7 @@ def test_load_unknown_leaves_workspace(ws: Workspace) -> None:
     with pytest.raises(NotFound):
         files.load(ws, 9999, discard_unsaved=True)
     with pytest.raises(NotFound):
-        files.load(ws, ws.project_pk, discard_unsaved=True)
+        files.load(ws, ws._project_pk, discard_unsaved=True)
     assert snapshot(ws) == before
 
 
@@ -269,7 +269,7 @@ def test_export_results_stale_and_roundtrip(ws: Workspace, tmp_path: Path) -> No
     build(ws)
     no_result = files.export_csv(ws)
     assert "RESULT_" not in no_result
-    ws.store_result(sched.schedule(ws.project(), ws.config))
+    ws._store_result(sched.schedule(ws.project(), ws.config))
     target = tmp_path / "out.csv"
     text = files.export_csv(ws, target)
     assert "RESULT_NODE" in text

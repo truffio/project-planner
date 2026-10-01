@@ -35,7 +35,11 @@ thread applies the result, and ``result()`` returns the value without storing it
 * Newer explicit actions win: if, after submission, another result was stored or
   discarded and the workspace now holds a *current* run that this result would
   replace, the result is not stored (``job.stored is False``); the same holds after
-  the workspace project was replaced (load / import / new project).
+  the workspace project was replaced (load / import / new project). A result whose
+  kind was explicitly removed after submission is not stored either: a preview after
+  ``discard_leveling()``, ``apply_leveling()`` or ``reset_to_dependency_schedule()``,
+  and any result after a discard of its kind (finding 14). The fresh dependency-only
+  base a leveling job may have calculated is still stored by the usual rules.
 
 Windows / frozen apps: process workers are started with ``spawn``, so worker
 functions are top-level and arguments are pickled. A PyInstaller-built entry point
@@ -95,6 +99,7 @@ _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
 _TERMINAL: frozenset[str] = frozenset({"done", "failed", "cancelled"})
+_KINDS: frozenset[str] = frozenset(k.value for k in RunKind)
 _WAIT_SLICE = 0.05  # seconds between checks while result() waits
 _PROXY_CANCEL_INTERVAL = 0.02  # seconds between cancel-event round trips to the Manager
 
@@ -301,8 +306,9 @@ class Job:
         self._stored: bool | None = None
         self._delivering = False
         self._overtaken = False  # a result was stored / discarded by someone else
+        self._dropped: set[RunKind] = set()  # kinds explicitly removed after submit
         self._replaced = False  # the workspace project was replaced
-        self._unsubscribe: Callable[[], None] | None = ws.events.subscribe(self._on_event)
+        self._unsubscribe: Callable[[], None] | None = ws.subscribe(self._on_event)
 
     def __repr__(self) -> str:
         return f"<Job {self._kind} {self._status} {self._progress:.0%}>"
@@ -405,6 +411,11 @@ class Job:
             self._replaced = True
         elif event.kind is EventKind.RESULT_STORED:
             self._overtaken = True
+            if event.operation == "discard_results":
+                self._dropped.update(RunKind(k) for k in event.ids)
+            elif RunKind.LEVELED in (RunKind(k) for k in event.ids if k in _KINDS):
+                # applying leveling consumes the preview
+                self._dropped.add(RunKind.LEVELING_PREVIEW)
 
     def _on_future_done(self, _future: Future[Any]) -> None:
         if self._on_owner_thread():  # inline executor: store before submit returns
@@ -483,11 +494,13 @@ class Job:
                 result = engine.recost(result, project)  # rate-only edits meanwhile
             if self._replaced:
                 return result, False
+            if RunKind(result.kind) in self._dropped:
+                return result, False  # discarded / applied after submission: user wins
             if self._overtaken:
-                runs = ws.results.fingerprints()
+                runs = ws._results.fingerprints()
                 if any(runs[k][0] == sfp for k in _replaced_kinds(result.kind) if k in runs):
                     return result, False
-            ws.store_result(result)
+            ws._store_result(result)
             return result, True
 
         if self._kind == "schedule":

@@ -16,15 +16,22 @@ with each result to the current project's. Rate / cost-view edits recost results
 whose dates are still current, in the same transaction.
 
 Extension points for the other service tasks (separate modules that ``Workspace``
-delegates to; marked ``DELEGATION POINT`` below):
+delegates to; marked ``DELEGATION POINT`` below). This plumbing is internal
+(underscore-prefixed) and not part of the public API:
 
-* T32 ``services/compute.py`` + ``jobs.py``: ``schedule``, ``level_preview``,
+* ``services/compute.py`` + ``jobs.py``: ``schedule``, ``level_preview``,
   ``apply_leveling``, ``submit_*`` ... They read ``ws.project()``, call the engine and
-  hand results to :meth:`Workspace.store_result` / :meth:`Workspace.discard_results`.
-* T33 ``services/files.py``: ``save``, ``save_as``, ``load``, ``list_projects``,
-  ``import_csv`` ... They use :attr:`Workspace.connection`, :attr:`Workspace.project_pk`,
-  :meth:`Workspace.require_clean`, :meth:`Workspace.reload` after replacing the
-  workspace rows, and :meth:`Workspace.mark_clean` after a save / load.
+  hand results to :meth:`Workspace._store_result` / :meth:`Workspace._discard_results`
+  (both make the workspace dirty: stored results are part of what Save persists).
+* ``services/files.py``: ``save``, ``save_as``, ``load``, ``list_projects``,
+  ``import_csv`` ... They use ``ws._connection``, ``ws._project_pk``,
+  :meth:`Workspace._require_clean`, :meth:`Workspace._check_revision` and
+  :meth:`Workspace._write_clean` inside their single transaction, then
+  :meth:`Workspace._reload` / :meth:`Workspace._set_clean` after the commit.
+
+Concurrency (D12): one open workspace per database file (an OS lock on a sidecar
+``<database>.lock`` file), and every write checks the revision it expects
+(``UPDATE ... WHERE revision = ?``), raising ``Conflict`` on a mismatch.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ import datetime as dt
 import re
 import sqlite3
 import uuid
+import weakref
 from collections import deque
 from collections.abc import Callable, Collection, Iterable, Sequence
 from concurrent.futures import Executor
@@ -75,7 +83,7 @@ from project_planner.engine.network import cycle_issue
 from project_planner.engine.results import LevelingResult, ScheduleResult
 from project_planner.persistence import repositories as repo
 from project_planner.persistence import row_ops
-from project_planner.persistence.db import connect, transaction
+from project_planner.persistence.db import FileLock, connect, transaction
 from project_planner.persistence.migrations import migrate
 from project_planner.persistence.records import RunKind
 from project_planner.services.dto import DeletePreview, WorkspaceState
@@ -138,6 +146,27 @@ def _id_of(value: str | _HasId, what: str = "id") -> str:
     raise TypeError(
         f"{what} must be an ID string or an object with an .id, got {type(value).__name__}"
     )
+
+
+def _project_id(value: object) -> int | str:
+    """A saved project's id from a ``ProjectInfo`` (or anything with an ``.id``) or the id."""
+    ident = getattr(value, "id", value)
+    if isinstance(ident, int | str):
+        return ident
+    raise TypeError(
+        f"project_id must be a ProjectInfo, an int or a str, got {type(value).__name__}"
+    )
+
+
+def _release(conn: sqlite3.Connection, lock: FileLock | None) -> None:
+    """Close the connection, then drop the file lock (``weakref.finalize`` target)."""
+    try:
+        conn.close()
+    except sqlite3.ProgrammingError:
+        pass  # collected on another thread: SQLite closes the handle on deallocation
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def _name(value: object, object_type: ObjectType, object_id: str | None) -> str:
@@ -353,22 +382,40 @@ _WriteFn = Callable[[sqlite3.Connection, int], None]
 
 
 class Workspace:
-    """Working project of one SQLite database. Create with :func:`open_workspace`."""
+    """Working project of one SQLite database. Create with :func:`open_workspace`.
+
+    A file database can be open in only one workspace at a time (D12): the workspace
+    holds an OS lock on ``<database>.lock`` until :meth:`close` (or garbage collection,
+    or process exit). Every write additionally checks that the stored revision is the
+    one this workspace last saw and raises ``Conflict`` otherwise.
+
+    Members starting with ``_`` (``_store_result``, ``_discard_results``,
+    ``_mark_clean``, ``_reload``, ``_require_clean``, ``_connection``, ``_results``,
+    ``_project_pk``) are internal plumbing for the service modules.
+    """
 
     def __init__(
-        self, conn: sqlite3.Connection, project_pk: int, config: Config = DEFAULT_CONFIG
+        self,
+        conn: sqlite3.Connection,
+        project_pk: int,
+        config: Config = DEFAULT_CONFIG,
+        *,
+        lock: FileLock | None = None,
     ) -> None:
-        self._conn = conn
-        self._pk = project_pk
-        self.config = config
-        self.events = EventBus()
+        self._connection = conn
+        self._project_pk = project_pk
+        self._config = config
+        self._events = EventBus()
         self.calendar = CalendarApi(self)
         self._closed = False
+        self._finalizer = weakref.finalize(self, _release, conn, lock)
         self._previews: dict[str, DeletePreview] = {}
         self._fp_cache: tuple[int, str, str] | None = None
         self._project: Project
         self._revision = 0
         self._based_on_revision = 1
+        self._results_gen = 0
+        self._based_on_results_gen = 0
         self._ids: _IdAllocator
         self._results = ResultStore(conn, project_pk, lambda: self._project)
         self._load_cache()
@@ -376,22 +423,24 @@ class Workspace:
     # --------------------------------------------------------------- lifecycle
 
     def _load_cache(self) -> None:
-        record = repo.get_project_record(self._conn, self._pk)
-        self._project = repo.load_project(self._conn, self._pk)
+        record = repo.get_project_record(self._connection, self._project_pk)
+        self._project = repo.load_project(self._connection, self._project_pk)
         self._revision = record.revision
         self._based_on_revision = (
             record.based_on_revision if record.based_on_revision is not None else 1
         )
+        self._results_gen = record.results_gen
+        self._based_on_results_gen = record.based_on_results_gen
         self._ids = _IdAllocator(self._project)
         self._previews.clear()
         self._fp_cache = None
-        self._results.reset(self._pk)
+        self._results.reset(self._project_pk)
 
     def close(self) -> None:
-        """Close the database connection (idempotent)."""
+        """Close the database connection and release the file lock (idempotent)."""
         if not self._closed:
             self._closed = True
-            self._conn.close()
+            self._finalizer()
 
     def __enter__(self) -> Workspace:
         return self
@@ -408,57 +457,127 @@ class Workspace:
         if self._closed:
             raise RuntimeError("workspace is closed")
 
+    @property
+    def config(self) -> Config:
+        """The configuration the workspace was opened with (read-only)."""
+        return self._config
+
     def subscribe(self, callback: Callback) -> Callable[[], None]:
         """Register an event callback; returns the function that unsubscribes it."""
-        return self.events.subscribe(callback)
+        return self._events.subscribe(callback)
 
     def __repr__(self) -> str:
         name = self._project.name
         return f"<Workspace {name!r} revision={self._revision}{' closed' if self._closed else ''}>"
 
-    # ------------------------------------------------- service-extension surface
-
-    @property
-    def connection(self) -> sqlite3.Connection:
-        """The workspace connection (for T33 file operations and T32 job storage)."""
-        return self._conn
-
-    @property
-    def project_pk(self) -> int:
-        """Primary key of the workspace project row."""
-        return self._pk
-
-    @property
-    def results(self) -> ResultStore:
-        """The result store (cache + persistence) of the workspace project."""
-        return self._results
-
     @property
     def dirty(self) -> bool:
-        """Whether the revision differs from the one last saved / loaded."""
-        return self._revision != self._based_on_revision
+        """Unsaved changes since the last save / load.
 
-    def require_clean(self, discard_unsaved: bool = False) -> None:
+        True when the definition revision *or* the stored results changed (every store
+        or discard of a result counts, including a discarded preview; G1).
+        """
+        return (
+            self._revision != self._based_on_revision
+            or self._results_gen != self._based_on_results_gen
+        )
+
+    # ------------------------------------------------- internal service plumbing
+
+    def _require_clean(self, discard_unsaved: bool = False) -> None:
         """Raise ``UnsavedChanges`` if dirty and ``discard_unsaved`` is false."""
         if self.dirty and not discard_unsaved:
             raise UnsavedChanges()
 
-    def mark_clean(self, based_on_pk: int | None = None) -> None:
-        """Record that the current revision was just saved / loaded (T33 calls this)."""
-        self._check_open()
-        with transaction(self._conn):
-            row_ops.set_based_on(self._conn, self._pk, based_on_pk, self._revision)
-        self._based_on_revision = self._revision
+    def _check_revision(self) -> None:
+        """``Conflict`` if another connection changed the workspace row."""
+        repo.check_revision(self._connection, self._project_pk, self._revision, self._results_gen)
 
-    def reload(self, *, operation: str = "reload") -> None:
+    def _write_clean(self, based_on_pk: int | None) -> None:
+        """Record the current revision / results generation as saved (in a transaction)."""
+        row_ops.set_based_on(
+            self._connection, self._project_pk, based_on_pk, self._revision, self._results_gen
+        )
+
+    def _set_clean(self) -> None:
+        """Update the in-memory saved markers after :meth:`_write_clean` committed."""
+        self._based_on_revision = self._revision
+        self._based_on_results_gen = self._results_gen
+
+    def _mark_clean(self, based_on_pk: int | None = None) -> None:
+        """Record that the current state was just saved / loaded (own transaction)."""
+        self._check_open()
+        with transaction(self._connection):
+            self._check_revision()
+            self._write_clean(based_on_pk)
+        self._set_clean()
+
+    def _reload(self, *, operation: str = "reload") -> None:
         """Re-read everything from the database after the rows were replaced elsewhere.
 
-        T33 (load / import) replaces the workspace rows with repository functions, then
-        calls this to refresh the cache and notify subscribers (``project_replaced``).
+        Load / import replace the workspace rows with repository functions (in one
+        transaction that also records the saved state), then call this to refresh the
+        cache and notify subscribers (``project_replaced``) with the final state.
         """
         self._check_open()
         self._load_cache()
-        self.events.emit(Event(EventKind.PROJECT_REPLACED, self._revision, (), operation))
+        self._events.emit(Event(EventKind.PROJECT_REPLACED, self._revision, (), operation))
+
+    def _store_result(self, result: ScheduleResult) -> None:
+        """Persist ``result`` as the stored run of its kind (see ``result_store`` rules).
+
+        Does not bump the revision (results are not part of the definition) but bumps
+        the results generation, so the workspace becomes dirty; emits
+        ``result_stored``. The result may already be stale; ``state()`` reports that.
+
+        Raises:
+            Conflict: another connection changed the workspace.
+        """
+        self._check_open()
+        try:
+            with transaction(self._connection):
+                gen = repo.bump_results_gen(
+                    self._connection,
+                    self._project_pk,
+                    revision=self._revision,
+                    results_gen=self._results_gen,
+                )
+                self._results.store(result)
+        except BaseException:
+            self._results.reset()
+            raise
+        self._results_gen = gen
+        self._events.emit(
+            Event(EventKind.RESULT_STORED, self._revision, (result.kind,), "store_result")
+        )
+
+    def _discard_results(self, kinds: Iterable[RunKind | str] | None = None) -> None:
+        """Delete stored results of ``kinds`` (all when ``None``); emits ``result_stored``.
+
+        Deleting at least one stored run makes the workspace dirty.
+        """
+        self._check_open()
+        wanted = tuple(RunKind) if kinds is None else tuple(RunKind(k) for k in kinds)
+        present = self._results.kinds()
+        gen = self._results_gen
+        try:
+            with transaction(self._connection):
+                if present.intersection(wanted):
+                    gen = repo.bump_results_gen(
+                        self._connection,
+                        self._project_pk,
+                        revision=self._revision,
+                        results_gen=self._results_gen,
+                    )
+                else:
+                    self._check_revision()
+                self._results.clear(wanted)
+        except BaseException:
+            self._results.reset()
+            raise
+        self._results_gen = gen
+        ids = tuple(str(k) for k in wanted)
+        self._events.emit(Event(EventKind.RESULT_STORED, self._revision, ids, "discard_results"))
 
     # ------------------------------------------------------------------- reads
 
@@ -691,39 +810,21 @@ class Workspace:
 
         return read_models.project_summary(self)
 
-    def load(self, project_id: int | str | _HasId, *, discard_unsaved: bool = False) -> None:
-        """Load a saved project (``UnsavedChanges`` if dirty unless ``discard_unsaved``)."""
-        from project_planner.services import files
+    def load(self, project_id: int | str | ProjectInfo, *, discard_unsaved: bool = False) -> None:
+        """Load a saved project (``UnsavedChanges`` if dirty unless ``discard_unsaved``).
 
-        pid = project_id if isinstance(project_id, int | str) else _id_of(project_id)
-        files.load(self, pid, discard_unsaved=discard_unsaved)
-
-    def delete_project(self, project_id: int | str | _HasId) -> None:
-        """Delete a saved project from the library."""
-        from project_planner.services import files
-
-        pid = project_id if isinstance(project_id, int | str) else _id_of(project_id)
-        files.delete_project(self, pid)
-
-    def store_result(self, result: ScheduleResult) -> None:
-        """Persist ``result`` as the stored run of its kind (see ``result_store`` rules).
-
-        Does not bump the revision (results are not part of the definition); emits
-        ``result_stored``. The result may already be stale; ``state()`` reports that.
+        ``project_id`` is a ``ProjectInfo`` (from :meth:`list_projects` / :meth:`save_as`)
+        or its ``id``.
         """
-        self._check_open()
-        self._results.store(result)
-        self.events.emit(
-            Event(EventKind.RESULT_STORED, self._revision, (result.kind,), "store_result")
-        )
+        from project_planner.services import files
 
-    def discard_results(self, kinds: Iterable[RunKind | str] | None = None) -> None:
-        """Delete stored results of ``kinds`` (all when ``None``); emits ``result_stored``."""
-        self._check_open()
-        wanted = None if kinds is None else tuple(RunKind(k) for k in kinds)
-        self._results.clear(wanted)
-        ids = tuple(str(k) for k in (wanted if wanted is not None else tuple(RunKind)))
-        self.events.emit(Event(EventKind.RESULT_STORED, self._revision, ids, "discard_results"))
+        files.load(self, _project_id(project_id), discard_unsaved=discard_unsaved)
+
+    def delete_project(self, project_id: int | str | ProjectInfo) -> None:
+        """Delete a saved project from the library (``ProjectInfo`` or its ``id``)."""
+        from project_planner.services import files
+
+        files.delete_project(self, _project_id(project_id))
 
     # ------------------------------------------------------------ edit machinery
 
@@ -739,16 +840,18 @@ class Workspace:
         """Write one edit atomically, then swap the cache and notify."""
         self._check_open()
         plan = self._results.plan_refresh(new_project) if refresh else {}
-        with transaction(self._conn):
-            write(self._conn, self._pk)
-            revision = repo.bump_revision(self._conn, self._pk)
+        with transaction(self._connection):
+            revision = repo.bump_revision(
+                self._connection, self._project_pk, expected=self._revision
+            )
+            write(self._connection, self._project_pk)
             self._results.write_plan(plan)
         self._project = new_project
         self._revision = revision
         self._results.apply_plan(plan)
         for ident in ids:
             self._ids.note(ident)
-        self.events.emit(Event(EventKind.EDITED, revision, tuple(ids), operation))
+        self._events.emit(Event(EventKind.EDITED, revision, tuple(ids), operation))
 
     def _replace(self, **changes: Any) -> Project:
         return dataclasses.replace(self._project, **changes)
@@ -783,7 +886,7 @@ class Workspace:
                 (nothing is replaced).
         """
         self._check_open()
-        self.require_clean(discard_unsaved)
+        self._require_clean(discard_unsaved)
         _name(name, ObjectType.PROJECT, None)
         if calendar is None:
             cal = Calendar()
@@ -799,14 +902,17 @@ class Workspace:
             cost_report_unit=self._work_unit(cost_report_unit, "p1"),
             calendar=cal,
         )
-        with transaction(self._conn):
-            repo.save_project(self._conn, self._pk, project)
-            repo.delete_runs(self._conn, self._pk)
-            row_ops.set_name(self._conn, self._pk, name)
-            revision = repo.bump_revision(self._conn, self._pk)
-            row_ops.set_based_on(self._conn, self._pk, None, revision)
+        conn, pk = self._connection, self._project_pk
+        with transaction(conn):
+            revision = repo.bump_revision(conn, pk, expected=self._revision)
+            repo.check_revision(conn, pk, revision, self._results_gen)
+            repo.save_project(conn, pk, project)
+            repo.delete_runs(conn, pk)
+            row_ops.set_name(conn, pk, name)
+            # A fresh project is "clean": nothing to save yet.
+            row_ops.set_based_on(conn, pk, None, revision, self._results_gen)
         self._load_cache()
-        self.events.emit(Event(EventKind.PROJECT_REPLACED, self._revision, (), "new_project"))
+        self._events.emit(Event(EventKind.PROJECT_REPLACED, self._revision, (), "new_project"))
 
     # ----------------------------------------------------------- project settings
 
@@ -1126,12 +1232,12 @@ class Workspace:
                     field="task_id",
                 )
             )
-        if value <= 0 or value > self.config.max_assignment_percent:
+        if value <= 0 or value > self._config.max_assignment_percent:
             issues.append(
                 Issue.error(
                     "ASSIGN_PERCENT_RANGE",
                     f"assignment {key}: percent {value} must be greater than 0 and at most "
-                    f"{self.config.max_assignment_percent}",
+                    f"{self._config.max_assignment_percent}",
                     object_type=ObjectType.ASSIGNMENT,
                     object_id=key,
                     field="percent",
@@ -1395,8 +1501,23 @@ def open_workspace(path: str | Path = ":memory:", *, config: Config = DEFAULT_CO
 
     ``":memory:"`` gives a throwaway workspace. A new database starts with an empty
     untitled project dated today; call :meth:`Workspace.new_project` to set up a real one.
+
+    A database file can be open in one workspace at a time (D12); the lock is released
+    by :meth:`Workspace.close` (or leaving its ``with`` block, or the process ending).
+
+    Raises:
+        Conflict: the file is already open in another workspace (this or another
+            process), or its schema is newer than this code.
     """
-    conn = connect(path)
+    lock = None if str(path) in (":memory:", "") else FileLock(path)
+    if lock is not None:
+        lock.acquire()
+    try:
+        conn = connect(path)
+    except BaseException:
+        if lock is not None:
+            lock.release()
+        raise
     try:
         migrate(conn)
         pk = repo.get_workspace_pk(conn)
@@ -1405,8 +1526,8 @@ def open_workspace(path: str | Path = ":memory:", *, config: Config = DEFAULT_CO
                 pk = repo.create_workspace(
                     conn, Project(id="p1", name="Untitled", start=dt.date.today())
                 )
-                row_ops.set_based_on(conn, pk, None, 1)
-        return Workspace(conn, pk, config)
+                row_ops.set_based_on(conn, pk, None, 1, 0)
+        return Workspace(conn, pk, config, lock=lock)
     except BaseException:
-        conn.close()
+        _release(conn, lock)
         raise

@@ -50,13 +50,13 @@ def schedule(ws: Workspace) -> ScheduleResult:
         ValidationFailed: structural errors (nothing is stored).
     """
     result = engine.schedule(ws.project(), ws.config)
-    ws.store_result(result)
+    ws._store_result(result)
     return result
 
 
 def current_base(ws: Workspace) -> ScheduleResult | None:
     """The stored dependency-only result if its dates match the definition, else ``None``."""
-    base = ws.results.get(RunKind.DEPENDENCY_ONLY)
+    base = ws._results.get(RunKind.DEPENDENCY_ONLY)
     if base is None or base.schedule_fp != schedule_fp(ws.project()):
         return None
     return base
@@ -76,7 +76,7 @@ def level_preview(ws: Workspace) -> LevelingResult:
     if base is None:
         base = schedule(ws)
     preview = engine.level(ws.project(), base, ws.config)
-    ws.store_result(preview.result)
+    ws._store_result(preview.result)
     return preview
 
 
@@ -86,19 +86,19 @@ def apply_leveling(ws: Workspace) -> ScheduleResult:
     Raises:
         Conflict: no preview is stored, or the definition changed since it was made.
     """
-    preview = ws.results.get(RunKind.LEVELING_PREVIEW)
+    preview = ws._results.get(RunKind.LEVELING_PREVIEW)
     if preview is None:
         raise Conflict("no leveling preview to apply")
     if preview.schedule_fp != schedule_fp(ws.project()):
         raise Conflict("the leveling preview is stale; level again")
     leveled = engine.with_kind(preview, "leveled")
-    ws.store_result(leveled)
+    ws._store_result(leveled)
     return leveled
 
 
 def discard_leveling(ws: Workspace) -> None:
     """Drop the stored leveling preview, if any (the current result is unchanged)."""
-    ws.discard_results([RunKind.LEVELING_PREVIEW])
+    ws._discard_results([RunKind.LEVELING_PREVIEW])
 
 
 def reset_to_dependency_schedule(ws: Workspace) -> ScheduleResult | None:
@@ -107,5 +107,5 @@ def reset_to_dependency_schedule(ws: Workspace) -> ScheduleResult | None:
     Nothing is recalculated: a stale dependency-only result stays (visibly) stale.
     Returns the new ``ws.result()`` (``None`` if no dependency-only result is stored).
     """
-    ws.discard_results([RunKind.LEVELED, RunKind.LEVELING_PREVIEW])
+    ws._discard_results([RunKind.LEVELED, RunKind.LEVELING_PREVIEW])
     return ws.result()

@@ -594,12 +594,9 @@ def test_model_errors_in_one_pass() -> None:
     ]
 
 
-def test_missing_node_and_missing_calendar() -> None:
+def test_missing_calendar_is_the_only_error_without_nodes() -> None:
     text = HEADER + "\n" + line_of(rt="PROJECT", name="P", start_date="2026-03-02") + "\n"
-    assert codes_of(text) == [
-        (1, "record_type", "CSV_MISSING_CALENDAR"),
-        (1, "record_type", "CSV_MISSING_NODE"),
-    ]
+    assert codes_of(text) == [(1, "record_type", "CSV_MISSING_CALENDAR")]
 
 
 def test_duplicate_calendar() -> None:
@@ -926,7 +923,7 @@ def test_export_stale_and_incomplete_status() -> None:
     assert status(result, stale=True) == "stale"
     incomplete = replace(result, complete=False, cost_complete=False)
     assert status(incomplete) == "incomplete"
-    assert status(incomplete, stale=True) == "stale"  # stale takes precedence
+    assert status(incomplete, stale=True) == "stale_incomplete"  # neither hides the other
     # stale values are still the old ones
     stale_rows = csv_rows(export(p, result, stale=True))
     assert next(x for x in stale_rows if x["record_type"] == "RESULT_PROJECT")["cost"] == "3600.00"

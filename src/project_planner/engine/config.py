@@ -19,8 +19,11 @@ are therefore plain strings; ``engine.model`` turns them into enum members.
 from __future__ import annotations
 
 import datetime as dt
+import functools
+from collections.abc import Callable
 from dataclasses import dataclass
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
+from typing import ParamSpec, TypeVar
 
 __all__ = [
     "DAYS_DISPLAY_DECIMALS",
@@ -35,8 +38,35 @@ __all__ = [
     "MAX_ASSIGNMENT_PERCENT",
     "MONEY_DISPLAY_DECIMALS",
     "MONEY_ROUNDING",
+    "ENGINE_CONTEXT",
     "Config",
+    "engine_context",
 ]
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+ENGINE_CONTEXT: Context = Context(prec=28, rounding=ROUND_HALF_EVEN)
+"""The ``decimal`` context all engine arithmetic runs in (independent of the caller's).
+
+28 significant digits equals the Python default, so results are unchanged by the isolation.
+"""
+
+
+def engine_context(func: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Run ``func`` inside ``localcontext(ENGINE_CONTEXT)`` (finding 4).
+
+    Results then never depend on the caller's (or a worker process's) global
+    ``decimal`` context. Nesting is harmless.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with localcontext(ENGINE_CONTEXT):
+            return func(*args, **kwargs)
+
+    return wrapper
+
 
 # --- application limits (plan section 2, decisions 4, 7, 9) ---------------------
 
@@ -96,8 +126,16 @@ class Config:
     days_rounding: str = DAYS_ROUNDING
 
     def __post_init__(self) -> None:
-        if not isinstance(self.max_assignment_percent, Decimal):
-            raise TypeError("max_assignment_percent must be a Decimal")
+        mp = self.max_assignment_percent
+        if isinstance(mp, int) and not isinstance(mp, bool):
+            object.__setattr__(self, "max_assignment_percent", Decimal(mp))
+        elif isinstance(mp, str):
+            try:
+                object.__setattr__(self, "max_assignment_percent", Decimal(mp.strip()))
+            except ArithmeticError:
+                raise ValueError(f"max_assignment_percent {mp!r} is not a number") from None
+        elif not isinstance(mp, Decimal):
+            raise TypeError("max_assignment_percent must be a Decimal (or int / str)")
         if not self.max_assignment_percent.is_finite() or self.max_assignment_percent <= 0:
             raise ValueError("max_assignment_percent must be a finite value > 0")
         for name in ("days_display_decimals", "money_display_decimals"):
@@ -105,10 +143,12 @@ class Config:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be an int >= 0")
 
+    @engine_context
     def round_days(self, value: Decimal) -> Decimal:
         """Round a day value for display/export (``days_display_decimals``)."""
         return value.quantize(Decimal(1).scaleb(-self.days_display_decimals), self.days_rounding)
 
+    @engine_context
     def round_money(self, value: Decimal) -> Decimal:
         """Round a money amount for display/export (``money_display_decimals``)."""
         return value.quantize(Decimal(1).scaleb(-self.money_display_decimals), self.money_rounding)

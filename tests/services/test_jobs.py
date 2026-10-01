@@ -134,7 +134,7 @@ def executor(request: pytest.FixtureRequest) -> Iterator[Executor]:
 def test_schedule_job_matches_sync(ws: Workspace, executor: Executor) -> None:
     build(ws)
     sync = compute.schedule(ws)
-    ws.discard_results()
+    ws._discard_results()
     job = jobs.submit_schedule(ws, executor=executor)
     seen = watch(job)
     res = job.result(timeout=TIMEOUT)
@@ -162,7 +162,7 @@ def test_leveling_job_matches_sync(ws: Workspace, executor: Executor) -> None:
     preview = job.result(timeout=TIMEOUT)
     assert preview == sync
     assert ws.state().has_preview is True
-    assert ws.results.get("leveling_preview") == sync.result
+    assert ws._results.get("leveling_preview") == sync.result
     assert len([d for d in preview.delays_days.values() if d > 0]) == len(tasks) - 1
     assert all(0.0 <= p <= 1.0 for p in seen)
     assert seen == sorted(seen) and seen[-1] == 1.0
@@ -412,7 +412,7 @@ def test_poll_applies_finished_jobs(ws: Workspace, gated: GatedExecutor) -> None
     assert jobs.active_jobs(ws) == (job,)
     gated.gate.set()
     wait_until(lambda: job._future.done())
-    assert ws.results.current() is None  # nobody polled yet (state() itself polls, T35)
+    assert ws._results.current() is None  # nobody polled yet (state() itself polls, T35)
     assert jobs.poll(ws) == [job]
     assert ws.state().has_result is True
     assert jobs.active_jobs(ws) == ()
@@ -426,7 +426,7 @@ def test_process_pool_jobs_match_sync(ws: Workspace, process_pool: None) -> None
     _, tasks = build(ws, 40)
     sync = compute.schedule(ws)
     sync_preview = compute.level_preview(ws)
-    ws.discard_results()
+    ws._discard_results()
     job = jobs.submit_schedule(ws)
     assert job.result(timeout=TIMEOUT) == sync
     assert job.status == "done" and ws.result() == sync
@@ -480,3 +480,58 @@ def test_process_pool_cancel_large_leveling(ws: Workspace, process_pool: None) -
     # the pool is still usable afterwards
     after = jobs.submit_schedule(ws)
     assert timings(after.result(timeout=TIMEOUT)) == timings(base)
+
+
+# ------------------------------- explicit discard / apply after submit (finding 14)
+
+
+@pytest.mark.parametrize("action", ["discard_leveling", "apply_leveling", "reset"])
+def test_late_preview_not_stored_after_explicit_action(
+    ws: Workspace, gated: GatedExecutor, action: str
+) -> None:
+    build(ws, 4)
+    compute.schedule(ws)
+    if action != "discard_leveling":
+        compute.level_preview(ws)
+    if action == "reset":
+        compute.apply_leveling(ws)
+    job = jobs.submit_leveling_preview(ws, executor=gated)  # worker held at the gate
+    if action == "discard_leveling":
+        compute.discard_leveling(ws)
+        expected_kind = "dependency_only"
+    elif action == "apply_leveling":
+        compute.apply_leveling(ws)
+        expected_kind = "leveled"
+    else:
+        compute.reset_to_dependency_schedule(ws)
+        expected_kind = "dependency_only"
+    gated.gate.set()
+    job.result(timeout=TIMEOUT)
+    assert job.status == "done" and job.stored is False
+    assert ws.state().has_preview is False
+    current = ws.result()
+    assert current is not None and current.kind == expected_kind
+
+
+def test_late_schedule_job_not_stored_after_discard_results(
+    ws: Workspace, gated: GatedExecutor
+) -> None:
+    build(ws, 4)
+    compute.schedule(ws)
+    job = jobs.submit_schedule(ws, executor=gated)
+    ws._discard_results()
+    gated.gate.set()
+    job.result(timeout=TIMEOUT)
+    assert job.stored is False
+    assert ws.result() is None
+
+
+def test_preview_job_still_stored_without_explicit_action(
+    ws: Workspace, gated: GatedExecutor
+) -> None:
+    build(ws, 4)
+    compute.schedule(ws)
+    job = jobs.submit_leveling_preview(ws, executor=gated)
+    gated.gate.set()
+    job.result(timeout=TIMEOUT)
+    assert job.stored is True and ws.state().has_preview is True

@@ -36,7 +36,12 @@ from project_planner.engine.errors import Issue, ObjectType, Severity, Validatio
 from project_planner.engine.model import NodeKind, Project, SizingMode
 from project_planner.engine.network import DependencyGraph, DirectedGraph, cycle_issue
 
-__all__ = ["ensure_valid", "schedule_blocking", "validate"]
+__all__ = ["ensure_valid", "issue_sort_key", "missing_rate_issues", "schedule_blocking", "validate"]
+
+
+def issue_sort_key(issue: Issue) -> tuple[str, str, str, str]:
+    """The ordering of :func:`validate`'s output."""
+    return (issue.object_type or "", issue.object_id or "", issue.field or "", issue.code)
 
 
 def validate(project: Project, config: Config = DEFAULT_CONFIG) -> list[Issue]:
@@ -46,7 +51,7 @@ def validate(project: Project, config: Config = DEFAULT_CONFIG) -> list[Issue]:
     _check_dependencies(project, issues)
     _check_assignments(project, config, issues)
     _check_costs_and_sizing(project, issues)
-    issues.sort(key=lambda i: (i.object_type or "", i.object_id or "", i.field or "", i.code))
+    issues.sort(key=issue_sort_key)
     return issues
 
 
@@ -210,18 +215,23 @@ def _check_assignments(project: Project, config: Config, issues: list[Issue]) ->
             )
 
 
+def missing_rate_issues(project: Project) -> list[Issue]:
+    """``COST_MISSING_RATE`` warnings: assigned resources without an hourly rate."""
+    return [
+        Issue.warning(
+            "COST_MISSING_RATE",
+            f"resource {r.id} has assignments but no hourly rate; costs will be incomplete",
+            object_type=ObjectType.RESOURCE,
+            object_id=r.id,
+            field="hourly_rate",
+        )
+        for r in project.resources
+        if r.hourly_rate is None and project.assignments_for_resource(r.id)
+    ]
+
+
 def _check_costs_and_sizing(project: Project, issues: list[Issue]) -> None:
-    for r in project.resources:
-        if r.hourly_rate is None and project.assignments_for_resource(r.id):
-            issues.append(
-                Issue.warning(
-                    "COST_MISSING_RATE",
-                    f"resource {r.id} has assignments but no hourly rate; costs will be incomplete",
-                    object_type=ObjectType.RESOURCE,
-                    object_id=r.id,
-                    field="hourly_rate",
-                )
-            )
+    issues.extend(missing_rate_issues(project))
     for n in project.nodes:
         if n.kind is not NodeKind.TASK:
             continue
@@ -235,8 +245,11 @@ def _check_costs_and_sizing(project: Project, issues: list[Issue]) -> None:
                     field="sizing",
                 )
             )
-        elif n.sizing_mode is SizingMode.EFFORT and not any(
-            a.percent > 0 for a in project.assignments_for(n.id)
+        elif (
+            n.sizing_mode is SizingMode.EFFORT
+            and n.sizing is not None
+            and n.sizing.value != 0  # zero effort is schedulable (duration 0)
+            and not any(a.percent > 0 for a in project.assignments_for(n.id))
         ):
             issues.append(
                 Issue.warning(

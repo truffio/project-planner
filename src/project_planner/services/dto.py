@@ -13,7 +13,7 @@ class WorkspaceState:
 
     Attributes:
         revision: Bumped by every edit (not by storing a result).
-        dirty: The revision differs from the one last saved / loaded.
+        dirty: The definition or the stored results changed since the last save / load.
         stale_dates: A result exists whose schedule fingerprint no longer matches.
         stale_costs: A result exists whose cost fingerprint no longer matches.
         has_preview: A leveling preview is stored.

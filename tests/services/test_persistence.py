@@ -13,6 +13,7 @@ from fixtures.builders import ProjectBuilder
 
 from project_planner.engine.errors import Conflict, Issue, NotFound
 from project_planner.engine.model import Project, WbsNode
+from project_planner.persistence import migrations
 from project_planner.persistence import repositories as repo
 from project_planner.persistence.db import connect, transaction
 from project_planner.persistence.migrations import LATEST_VERSION, migrate, schema_version
@@ -90,11 +91,11 @@ def assert_same(a: Project, b: Project) -> None:
 def test_migrate_empty_db_and_idempotent():
     c = connect(":memory:")
     assert schema_version(c) == 0
-    assert migrate(c) == 1 == LATEST_VERSION
+    assert migrate(c) == 2 == LATEST_VERSION
     before = dump(c)
-    assert migrate(c) == 1
+    assert migrate(c) == LATEST_VERSION
     assert dump(c) == before
-    assert schema_version(c) == 1
+    assert schema_version(c) == LATEST_VERSION
     assert c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
@@ -119,7 +120,7 @@ def test_file_db_survives_reopen(tmp_path):
     pk = repo.create_workspace(c, project)
     c.close()
     c2 = connect(path)
-    assert migrate(c2) == 1
+    assert migrate(c2) == LATEST_VERSION
     assert_same(repo.load_project(c2, pk), project)
     c2.close()
 
@@ -439,3 +440,132 @@ def test_bulk_load_query_count_and_speed(tmp_path):
     # executemany issues one statement trace per row, but only a handful of distinct SQL texts
     assert len({s.split("(")[0] for s in saves if s.startswith("INSERT")}) <= 8
     c.close()
+
+
+# --- schema v2: AUTOINCREMENT ids, results generation, revision checks (review batch A) ----
+
+
+def _v1_database(path) -> sqlite3.Connection:
+    """A database exactly as the v1 code created it (the frozen v1 DDL, user_version 1)."""
+    c = connect(path)
+    c.executescript(migrations._v1() + "\nPRAGMA user_version = 1;")
+    assert schema_version(c) == 1
+    cols = [r[1] for r in c.execute("PRAGMA table_info(projects)")]
+    assert "results_gen" not in cols
+    sql = c.execute("SELECT sql FROM sqlite_master WHERE name = 'projects'").fetchone()[0]
+    assert "AUTOINCREMENT" not in sql
+    return c
+
+
+def _counts(c: sqlite3.Connection) -> dict[str, int]:
+    tables = [
+        r[0]
+        for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+    ]
+    return {t: c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in sorted(tables)}
+
+
+def test_upgrade_v1_file_preserves_data_and_foreign_keys(tmp_path):
+    path = tmp_path / "v1.db"
+    c = _v1_database(path)
+    project = rich_project()
+    ws = repo.create_workspace(c, project)
+    nodes, assigns, segs, issues = sample_results()
+    repo.save_run(c, ws, make_run(), nodes, assigns, segs, issues)
+    repo.bump_revision(c, ws)
+    a = repo.copy_project(c, ws, kind="saved", name="A")
+    b = repo.copy_project(c, ws, kind="saved", name="B")
+    c.execute("UPDATE projects SET based_on_pk = ?, based_on_revision = 2 WHERE pk = ?", (b, ws))
+    rows_before = c.execute(
+        "SELECT pk, kind, name, project_id, project_name, start, currency, cost_report_unit, "
+        "revision, based_on_pk, based_on_revision, saved_at FROM projects ORDER BY pk"
+    ).fetchall()
+    counts_before = _counts(c)
+    runs_before = {pk: repo.load_runs(c, pk) for pk in (ws, a, b)}
+    c.close()
+
+    c2 = connect(path)
+    assert migrate(c2) == LATEST_VERSION == 2
+    assert c2.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert c2.execute("PRAGMA foreign_key_check").fetchall() == []
+    sql = c2.execute("SELECT sql FROM sqlite_master WHERE name = 'projects'").fetchone()[0]
+    assert "AUTOINCREMENT" in sql
+    rows_after = c2.execute(
+        "SELECT pk, kind, name, project_id, project_name, start, currency, cost_report_unit, "
+        "revision, based_on_pk, based_on_revision, saved_at FROM projects ORDER BY pk"
+    ).fetchall()
+    assert rows_after == rows_before
+    counts_after = _counts(c2)
+    assert counts_after == counts_before
+    for pk in (ws, a, b):
+        assert_same(repo.load_project(c2, pk), project)
+        assert repo.load_runs(c2, pk) == runs_before[pk]
+        rec = repo.get_project_record(c2, pk)
+        assert (rec.results_gen, rec.based_on_results_gen) == (0, 0)
+    # unique indexes are back
+    with pytest.raises(Conflict):
+        repo.copy_project(c2, ws, kind="saved", name="A")
+    with pytest.raises(Conflict):
+        repo.create_workspace(c2, project)
+    # foreign keys point at the rebuilt table: deleting a saved project still cascades
+    repo.delete_saved_project(c2, a)
+    assert c2.execute("SELECT COUNT(*) FROM wbs_nodes WHERE project_pk = ?", (a,)).fetchone() == (
+        0,
+    )
+    assert (
+        c2.execute("SELECT COUNT(*) FROM schedule_runs WHERE project_pk = ?", (a,)).fetchone()[0]
+        == 0
+    )
+    # ids are never reused any more: delete the newest saved project, save again
+    repo.delete_saved_project(c2, b)
+    new = repo.copy_project(c2, ws, kind="saved", name="C")
+    assert new > b
+    assert migrate(c2) == LATEST_VERSION  # idempotent
+    c2.close()
+
+
+def test_saved_project_ids_are_not_reused(conn):
+    ws = repo.create_workspace(conn, rich_project())
+    a = repo.copy_project(conn, ws, kind="saved", name="A")
+    b = repo.copy_project(conn, ws, kind="saved", name="B")
+    repo.delete_saved_project(conn, b)
+    c = repo.copy_project(conn, ws, kind="saved", name="C")
+    assert c not in (a, b) and c > b
+
+
+def test_failed_v2_migration_leaves_v1_database(tmp_path, monkeypatch):
+    path = tmp_path / "v1.db"
+    c = _v1_database(path)
+    ws = repo.create_workspace(c, rich_project())
+    before = dump(c)
+    bad = migrations._Step(migrations._v2() + "\nSELECT no_such_function();", True)
+    monkeypatch.setitem(migrations._MIGRATIONS, 2, bad)
+    with pytest.raises(sqlite3.OperationalError):
+        migrate(c)
+    assert schema_version(c) == 1
+    assert not c.in_transaction
+    assert c.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert dump(c) == before
+    assert_same(repo.load_project(c, ws), rich_project())
+    c.close()
+
+
+def test_revision_checked_writes(conn):
+    pk = repo.create_workspace(conn, rich_project())
+    assert repo.bump_revision(conn, pk, expected=1) == 2
+    with pytest.raises(Conflict, match="another connection"):
+        repo.bump_revision(conn, pk, expected=1)
+    assert repo.get_project_record(conn, pk).revision == 2
+    with pytest.raises(NotFound):
+        repo.bump_revision(conn, 999, expected=1)
+    repo.check_revision(conn, pk, 2, 0)
+    with pytest.raises(Conflict):
+        repo.check_revision(conn, pk, 1)
+    assert repo.bump_results_gen(conn, pk, revision=2, results_gen=0) == 1
+    with pytest.raises(Conflict, match="results generation"):
+        repo.bump_results_gen(conn, pk, revision=2, results_gen=0)
+    with pytest.raises(Conflict):
+        repo.bump_results_gen(conn, pk, revision=1, results_gen=1)
+    assert repo.get_project_record(conn, pk).results_gen == 1

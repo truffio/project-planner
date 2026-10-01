@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project_planner"
+version = "0.1.0"
+description = "Project Planner backend: scheduling engine, persistence, and Python API"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+notebook = ["pandas"]
+dev = ["pytest", "pytest-cov", "hypothesis", "ruff", "mypy", "nbclient", "ipykernel"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+project_planner = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: unit tests",
+    "acceptance: acceptance tests",
+    "property: property-based tests",
+    "services: service layer tests",
+    "csv: CSV import/export tests",
+    "notebook: notebook integration tests",
+    "perf: performance tests",
+    "slow: slow tests",
+]
+addopts = "-m 'not perf and not notebook'"
+xfail_strict = true
+
+[tool.coverage.run]
+source = ["project_planner"]
+branch = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src"]

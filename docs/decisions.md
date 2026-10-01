@@ -202,3 +202,32 @@ Changes to working hours per day, weekdays, start time, holidays, or exceptions 
 - Calendar `workday_start = 09:00` (default)
 - Calendar `holidays = None` (default)
 - Calendar `exceptions = None` (default)
+
+## D12 — One open workspace per database file
+
+**Status:** Confirmed by the user, 2026-10-01 (review follow-up, T51 finding 1).
+**Spec reference:** §2 (single-user local application), §3.2.
+**Decision:** A database file may be opened by only one `Workspace` at a time; a second `open_workspace()` on the same file fails with a clear `Conflict`. In addition, every write checks the workspace revision it expects and raises `Conflict` if the stored revision differs (defence in depth).
+**Rationale:** Simultaneous multi-user editing is out of scope; two silently diverging workspaces were shown to corrupt the database.
+**Configuration:** None (behavioral rule).
+
+## D13 — CSV precision for work quantities and per-unit rates
+
+**Status:** Confirmed by the user, 2026-10-01 (review follow-up, T50 G4).
+**Spec reference:** §5.5, §12.2.
+**Decision:** CSV export keeps `work_qty` and `rate_per_unit` at up to 6 decimals (trailing zeros stripped); day values and money stay at 2 decimals.
+**Rationale:** Person-year quantities need more than 2 decimals to be meaningful.
+**Configuration:** None.
+
+## D14 — Floats in the public time constructors
+
+**Status:** Confirmed by the user, 2026-10-01 (review follow-up, T51 known item).
+**Spec reference:** §5.1.
+**Decision:** `pp.hours()` / `pp.days()` accept a `float` only if its shortest `repr` has at most 6 decimal places (e.g. `-0.5`, `1.25`); other floats (e.g. `0.1 + 0.2`) raise `TypeError` suggesting a string. The engine-level `hours()` / `days()` keep rejecting all floats.
+**Rationale:** Convenient literals in notebooks without silently storing binary-float artefacts.
+**Configuration:** None.
+
+## D15 — Review follow-up scope
+
+**Status:** Confirmed by the user, 2026-10-01.
+**Decision:** Fix review batches A (data integrity) and B (engine/CSV correctness) before the UI phase. Batches C (reporting), D (efficiency) and E (background file operations, schedule-job progress/cancel) are deferred to the UI phase. See `docs/review_code.md` and `docs/review_spec_conformance.md`.

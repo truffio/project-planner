@@ -19,10 +19,10 @@ Conventions chosen here:
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from project_planner.engine.calendar import WorkingAxis
 from project_planner.engine.config import DEFAULT_CONFIG, Config
@@ -31,7 +31,7 @@ from project_planner.engine.cost import cost_report as _cost_report
 from project_planner.engine.errors import Conflict, Issue, Severity, ValidationFailed
 from project_planner.engine.fingerprint import cost_fp, schedule_fp
 from project_planner.engine.forward_pass import NodeTiming, forward_pass
-from project_planner.engine.leveling import LevelingOutcome
+from project_planner.engine.leveling import LevelingDelay, LevelingOutcome
 from project_planner.engine.leveling import level as _level
 from project_planner.engine.loading import compute_loading
 from project_planner.engine.model import NodeKind, Project, WorkUnit
@@ -50,7 +50,7 @@ from project_planner.engine.rollup import rollup, wbs_numbers
 from project_planner.engine.sizing import TaskSizing, compute_sizing
 from project_planner.engine.validation import validate
 
-__all__ = ["cost_report", "level", "recost", "schedule", "with_kind"]
+__all__ = ["assemble", "cost_report", "level", "recost", "schedule", "with_kind"]
 
 _ZERO = Decimal(0)
 _SIZING_CODES = frozenset({"TASK_UNSIZED", "TASK_NO_CAPACITY"})
@@ -74,6 +74,15 @@ class _Prepared:
             merged.extend(sz.issues)
         merged.extend(self.axis.issues)
         self.issues = _dedupe(merged)
+
+
+class _Context(Protocol):
+    """What result assembly needs from a prepared schedule."""
+
+    sizing: dict[str, TaskSizing]
+    axis: WorkingAxis
+    mpd: int
+    issues: tuple[Issue, ...]
 
 
 def _dedupe(issues: list[Issue]) -> tuple[Issue, ...]:
@@ -113,7 +122,7 @@ def _datetimes(axis: WorkingAxis, start: int, finish: int) -> tuple[datetime, da
 
 def _assemble(
     project: Project,
-    prep: _Prepared,
+    prep: _Context,
     timings: Mapping[str, NodeTiming],
     kind: ResultKind,
     delays: Mapping[str, int],
@@ -294,6 +303,108 @@ def _cost_views(
         "missing_rate_resources": costs.missing_rate_resources,
         "costs": costs,
     }
+
+
+class _Restored:
+    """Assembly context built without a forward pass (see :func:`assemble`)."""
+
+    def __init__(self, project: Project, issues: tuple[Issue, ...]) -> None:
+        self.sizing: dict[str, TaskSizing] = compute_sizing(project)
+        self.axis = WorkingAxis(project.calendar, project.start)
+        self.mpd = self.axis.minutes_per_day
+        self.issues = issues
+
+
+def _fill_reasons(
+    project: Project, sizing: Mapping[str, TaskSizing], timings: Mapping[str, NodeTiming]
+) -> dict[str, NodeTiming]:
+    """Re-derive ``reason`` / ``blocked_by`` of unscheduled nodes that lack them.
+
+    Mirrors the texts of :func:`forward_pass` (same order, same format), so a result
+    rebuilt from stored start/finish/status equals the freshly calculated one.
+    """
+    out = dict(timings)
+    if all(t.status == "scheduled" or t.reason is not None for t in out.values()):
+        return out
+    try:
+        order: list[str] = topological_order(project)
+    except ValidationFailed:  # a cyclic (stale) definition: fall back to display order
+        order = [n.id for n in project.wbs_order() if n.kind is not NodeKind.GROUP]
+    done: set[str] = set()
+    for nid in order:
+        t = out.get(nid)
+        if t is None:
+            continue
+        if t.status != "scheduled" and t.reason is None:
+            bad = sorted(
+                {
+                    d.pred_id
+                    for d in project.dependencies_to(nid)
+                    if d.pred_id in done and out[d.pred_id].status != "scheduled"
+                }
+            )
+            if t.status == "blocked" and bad:
+                parts = []
+                for b in bad:
+                    pt = out[b]
+                    text = f"predecessor {b} is {pt.status}"
+                    if pt.reason:
+                        text += f" ({pt.reason})"
+                    parts.append(text)
+                out[nid] = NodeTiming(
+                    nid, None, None, "blocked", "blocked: " + "; ".join(parts), tuple(bad)
+                )
+            elif t.status == "blocked":
+                out[nid] = NodeTiming(nid, None, None, "blocked", "blocked")
+            else:
+                sz = sizing.get(nid)
+                detail = "; ".join(i.message for i in sz.issues) if sz is not None else ""
+                out[nid] = NodeTiming(
+                    nid, None, None, t.status, detail or "not schedulable", t.blocked_by
+                )
+        done.add(nid)
+    return out
+
+
+def assemble(
+    project: Project,
+    timings: Mapping[str, NodeTiming],
+    *,
+    kind: ResultKind,
+    delays: Mapping[str, int] | Iterable[LevelingDelay] = (),
+    issues: Iterable[Issue] = (),
+    config: Config = DEFAULT_CONFIG,
+) -> ScheduleResult:
+    """Rebuild a full :class:`ScheduleResult` from stored per-node timings.
+
+    Runs neither the forward pass nor leveling: ``timings`` (axis minutes of every
+    task and milestone, as stored) are taken as given, and rollup, loading, costs and
+    all views are derived from them, so for the project a result was calculated from
+    ``assemble(project, timings, kind=r.kind, delays=..., issues=r.issues)`` equals
+    ``r``. ``delays`` maps task ID to leveling delay minutes (or is an iterable of
+    :class:`LevelingDelay`); ``issues`` is taken verbatim (they were computed at
+    calculation time). Missing ``reason`` texts of unscheduled nodes are re-derived.
+
+    Timings of IDs that are not tasks/milestones of ``project`` are ignored and tasks
+    without timing are shown as unschedulable, so a *stale* stored result can still
+    be displayed against an edited project (the fingerprints then describe the
+    current project; callers that keep the stored ones should replace them).
+    """
+    ctx = _Restored(project, tuple(issues))
+    fixed: dict[str, NodeTiming] = {}
+    for n in project.nodes:
+        if n.kind is NodeKind.GROUP:
+            continue
+        t = timings.get(n.id)
+        if t is None:
+            t = NodeTiming(n.id, None, None, "unschedulable", "no stored timing")
+        fixed[n.id] = t
+    fixed = _fill_reasons(project, ctx.sizing, fixed)
+    if isinstance(delays, Mapping):
+        delay_minutes = dict(delays)
+    else:
+        delay_minutes = {d.task_id: d.minutes for d in delays}
+    return _assemble(project, ctx, fixed, kind, delay_minutes, config)
 
 
 def schedule(project: Project, config: Config = DEFAULT_CONFIG) -> ScheduleResult:

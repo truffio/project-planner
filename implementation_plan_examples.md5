@@ -1,0 +1,238 @@
+# Project Planner — Jupyter Examples Plan (sub-agent task list)
+
+Branch: `examples`
+Status: plan only. No code yet.
+Inputs: `README.md`, `docs/api.md`, `examples/quickstart.ipynb` (existing tour, kept as is).
+
+## 1. Goal
+
+Add three focused, beginner-friendly notebooks under `examples/`. Each one tells one story, runs top to bottom, and has a test that executes it and checks its key numbers.
+
+| # | Notebook | Story |
+|---|---|---|
+| 1 | `01_hello_world.ipynb` | The smallest useful plan: two tasks, one dependency, one schedule |
+| 2 | `02_team_allocation.ipynb` | A team of 4 on 8 tasks; the assignments overload one person while another is barely used |
+| 3 | `03_leveling.ipynb` | What leveling does and doesn't do: a small exact example, then the team project from notebook 2 |
+
+The existing `examples/quickstart.ipynb` stays as the full API tour.
+
+## 2. Shared conventions (all notebooks)
+
+- **Format:** nbformat v4, written by a throwaway generator script that is not committed. Notebooks are saved **without outputs**.
+- **Story first:** every code cell is preceded by a short markdown cell explaining *why*, not just *what*. Keep the prose plain and short, for a planner rather than a programmer.
+- **Workspace:** `pp.open_workspace(":memory:")`, so nothing is written to disk.
+- **Fixed dates:** project start is Monday 2026-10-05. The default calendar is Mon–Fri, 8 h/day and 09:00–17:00, with no holidays unless stated.
+- **No new dependencies:** charts are text bars built from the read views. An optional `matplotlib` cell is guarded by `try/except ImportError` and skipped quietly if the library is missing (see §6, decision Q1).
+- **Display:** rely on the built-in HTML tables (`ScheduleResult`, `CostReportView`, `LoadingView`, `TaskDetails`). Use `print` lines in the *exact label formats* given below, because the tests parse them.
+- **Verified expected values:** every number in §3 was checked against the engine on 2026-10-01. Tests assert these exact values; a notebook must not change the scenario data.
+
+## 3. Scenarios and expected values
+
+### 3.1 Notebook 1 — Hello world
+
+**Data:**
+- Project "Hello world", start Mon 2026-10-05.
+- Task "Say hello", `duration="1d"`.
+- Task "Celebrate", `duration="1d"`.
+- One FS dependency, Say hello → Celebrate.
+
+**Steps:**
+1. `import project_planner as pp`.
+2. Open a workspace and create the project.
+3. Add the two tasks and the dependency.
+4. `result = ws.schedule()`.
+5. Show `result`, then print the lines below.
+6. Change "Say hello" to `"2d"`. Show that `ws.state().stale_dates` is True, re-run `schedule()`, and print the new finish.
+
+**Printed lines (parsed by the test):**
+- `Say hello: 2026-10-05 09:00 -> 2026-10-05 17:00`
+- `Celebrate: 2026-10-06 09:00 -> 2026-10-06 17:00`
+- `Project finish: 2026-10-06 17:00`
+- `Out of date after edit: True`
+- `New project finish: 2026-10-07 17:00`
+
+### 3.2 Notebook 2 — Team allocation
+
+**Team** (hourly rates): Ana 90, Ben 80, Chloe 70, Dev 60.
+
+**Tasks** (all duration-based):
+
+| # | Task | Duration | Assignments | Predecessor (FS) |
+|---|---|---|---|---|
+| T1 | Requirements | 5d | Ana 100 % | — |
+| T2 | Architecture | 5d | Ana 50 %, Ben 50 % | — |
+| T3 | UX design | 5d | Ana 50 %, Chloe 100 % | — |
+| T4 | API build | 5d | Ben 100 % | T2 |
+| T5 | Frontend build | 5d | Chloe 100 %, Ana 50 % | T3 |
+| T6 | Test plan | 5d | Ana 50 % | — |
+| T7 | Data migration | 5d | Ana 100 % | T1 |
+| T8 | Release notes | 2d | Dev 25 % | T4 |
+
+**Story:**
+1. The plan looks reasonable task by task.
+2. The loading view reveals Ana at **250 %** in week 1 and 150 % in week 2.
+3. Meanwhile Dev has a single quarter-time, 2-day task.
+4. Show the per-person summary table and text bars.
+5. Close with a markdown takeaway: the schedule assumes everyone can do everything at once; leveling (notebook 3) or reassignment fixes it.
+
+**Expected values:**
+
+| Quantity | Value |
+|---|---|
+| Project finish | 2026-10-20 17:00 (12 working days) |
+| Working span | 12 days |
+| Total cost | 25040.00 |
+
+| Person | Peak load | Assigned person-days | Utilization (assigned ÷ 12 days) | Cost |
+|---|---|---|---|---|
+| Ana | 250 % | 20 | 166.7 % | 14400 |
+| Ben | 100 % | 7.5 | 62.5 % | 4800 |
+| Chloe | 100 % | 10 | 83.3 % | 5600 |
+| Dev | 25 % | 0.5 | 4.2 % | 240 |
+
+**Printed lines** (one per person, plus total and finish):
+- `Ana: peak 250% | 20 person-days | utilization 166.7% | cost 14400.00`
+- similar lines for Ben, Chloe and Dev;
+- `Total cost: 25040.00`
+- `Project finish: 2026-10-20 17:00`
+
+**Formatting:**
+- Utilization is rounded to 1 decimal place.
+- Costs are shown with 2 decimal places.
+- Person-days use the engine value normalised (`20`, `7.5`, `10`, `0.5`).
+
+**Text bars:** one row per person; each `█` = 25 %, with a `|` marker at 100 %. For example, `Ana   ██████████ 250%`.
+
+### 3.3 Notebook 3 — Leveling
+
+**Part A: an exact small example.** Team: Ana 90, Ben 80.
+
+| Task | Duration | Assignment | Predecessor |
+|---|---|---|---|
+| A | 3d | Ana 60 % | — |
+| B | 2d | Ana 60 % | — |
+| C | 2d | Ben 100 % | B (FS) |
+| D | 1d | Ana 50 % | — |
+
+Expected values:
+
+| | Before leveling | After `apply_leveling()` |
+|---|---|---|
+| Ana peak load | 170 % (A + B + D on day 1) | 60 % |
+| Project finish | 2026-10-08 17:00 | 2026-10-13 17:00 |
+| Total cost | 3800.00 | 3800.00 (unchanged) |
+
+Leveling delays:
+
+| Task | Delay | Cause |
+|---|---|---|
+| B | 3 days | resource (waits for A) |
+| C | 3 days | dependency (follows B) |
+| D | 5 days | resource |
+
+Leveled dates:
+- A: Mon 5 → Wed 7.
+- B: Thu 8 → Fri 9.
+- C: Mon 12 → Tue 13.
+- D: Mon 12 → Mon 12.
+
+**Story beats:**
+1. Show the overload.
+2. Run `level_preview()`. Explain that nothing has changed yet, and print the delays with their causes.
+3. Run `apply_leveling()`.
+4. Compare before and after (finish, peak, cost).
+5. Note what leveling never does: split tasks, change percentages, or reassign people.
+6. `reset_to_dependency_schedule()` brings the original back.
+
+**Part B: the team project from notebook 2.** Rebuild it with the same data in a small helper cell. Level it and show:
+- the finish moves from 2026-10-20 to **2026-10-30 17:00**;
+- every peak is ≤ 100 %;
+- the cost stays at 25040.00.
+
+End with a "what if we reassign instead?" section in two steps. Every value below is verified. Each step starts from a fresh copy of the team project (the helper cell rebuilds it), then reassigns, schedules and levels.
+
+1. **Move the wrong work.** "Test plan" goes from Ana 50 % to Dev 50 %.
+   - The cost drops by 600 to 24440.00.
+   - The leveled finish stays at **2026-10-30 17:00**, because Ana is still at 200 % on Requirements, Architecture and UX design.
+   - Markdown lesson: relief only helps if it removes load from the bottleneck's critical stretch.
+2. **Move the bottleneck's work.** "Data migration" goes from Ana 100 % to Dev 100 %.
+   - The leveled finish comes in to **2026-10-27 17:00**, 3 working days earlier than plain leveling.
+   - The cost falls to 23840.00 (40 h × (90 − 60) = −1200).
+   - The peak stays ≤ 100 %.
+   - Markdown lesson: leveling only delays; reassigning is a planning decision the tool leaves to you (spec §10).
+
+**Printed lines (parsed by the test):**
+- `Before: finish 2026-10-08 17:00 | Ana peak 170% | cost 3800.00`
+- `Delays: B 3 days (resource), C 3 days (dependency), D 5 days (resource)`
+- `After: finish 2026-10-13 17:00 | Ana peak 60% | cost 3800.00`
+- `Team before: finish 2026-10-20 17:00 | cost 25040.00`
+- `Team leveled: finish 2026-10-30 17:00 | max peak 100% or less | cost 25040.00`
+- `Move Test plan to Dev + level: finish 2026-10-30 17:00 | cost 24440.00`
+- `Move Data migration to Dev + level: finish 2026-10-27 17:00 | cost 23840.00`
+
+## 4. Task list
+
+**Rules for every agent:**
+- Use the model in the task's **Model** line.
+- Touch only the files listed under *Owns*.
+- Don't commit; the orchestrator verifies and commits.
+- Read only `docs/api.md`, `README.md` (examples section) and this plan's §2 plus your own scenario in §3.
+- Run your own test before reporting.
+
+**X1 — Hello world notebook**
+- Model: **Haiku**. It's small and fully specified: two tasks with exact printed lines.
+- Owns: `examples/01_hello_world.ipynb`, `tests/notebook/test_01_hello_world.py`.
+- Work: build the notebook per §2 and §3.1. The test executes it with `nbclient` (kernel `python3`, timeout 120 s) and asserts no cell errors plus every printed line in §3.1 verbatim. Mark the test `@pytest.mark.notebook` and use `pytest.importorskip("nbclient")`.
+- Done when: `.venv\Scripts\python -m pytest -q -m notebook tests/notebook/test_01_hello_world.py` passes, ruff is clean, and the notebook is saved without outputs.
+
+**X2 — Team allocation notebook**
+- Model: **Sonnet**. The data is fixed, but it needs presentation judgement (summary table, text bars, takeaway) and exact formatting rules.
+- Owns: `examples/02_team_allocation.ipynb`, `tests/notebook/test_02_team_allocation.py`.
+- Work:
+  - Build the notebook per §2 and §3.2.
+  - Compute per-person figures with the public API only: `ws.loading()`, `result.assignments`, `ws.cost_report()`. Don't recompute the schedule by hand.
+  - Include the optional guarded matplotlib bar chart (decision Q1).
+  - The test asserts every printed line in §3.2 verbatim, and that the text-bar cell contains Ana's bar marked above 100 %.
+- Done when: its notebook test passes, ruff is clean, and the notebook is saved without outputs.
+
+**X3 — Leveling notebook**
+- Model: **Sonnet**. Two parts, with before/after comparisons and an explanation of the rules. Every number is pre-verified, so Opus isn't needed.
+- Owns: `examples/03_leveling.ipynb`, `tests/notebook/test_03_leveling.py`.
+- Work:
+  - Build the notebook per §2 and §3.3.
+  - Part B rebuilds the team project in one helper cell, copying the §3.2 table exactly.
+  - The test asserts every printed line in §3.3 verbatim: Part A, team before/leveled, and both reassignment lines.
+  - It also asserts that a cell output reports every person's peak ≤ 100 % after each leveling.
+- Done when: its notebook test passes, ruff is clean, and the notebook is saved without outputs.
+
+**X4 — Examples index and README section**
+- Model: **Haiku**. Documentation only, with the content specified here.
+- Owns: `examples/README.md` (new), and the "In a Jupyter notebook" section of `README.md` only.
+- Work:
+  - `examples/README.md`: a table of the four notebooks, with title, what you learn, and suggested order (01, 02, 03, quickstart); how to open them (`pip install notebook`, `jupyter notebook examples/`); and how to run their tests (`pytest -m notebook`).
+  - In the root `README.md`, replace the single-notebook paragraph with a short list linking the four notebooks and `examples/README.md`.
+- Runs after X1–X3, so the titles are final.
+- Done when: the links resolve to existing files and no other README section is changed.
+
+**X5 — Verification (orchestrator, no agent)**
+- Run `pytest -q -m notebook` (all four notebook tests) and the default suite.
+- Open each generated notebook's JSON to confirm outputs are empty.
+- Spot-read the prose for clarity and accuracy against §3, especially the leveling rules in notebook 3.
+- Commit to `examples`.
+
+## 5. Order and parallelism
+
+```
+X1 (Haiku) ─┐
+X2 (Sonnet) ┼─► X4 (Haiku) ─► X5 (orchestrator) ─► commit
+X3 (Sonnet) ┘
+```
+
+X1, X2 and X3 run in parallel: their files are disjoint and they share no code, because each notebook is self-contained. X4 waits for them.
+
+**Cost profile:** 2 Haiku runs, 2 Sonnet runs, no Opus or Fable agents. The scenario design and number verification were done during planning, which is what makes the cheaper models safe here. If X2 or X3 fails its test twice, escalate that task to Opus (§4.1 rule 1 of the backend plan).
+
+## 6. Decisions (confirmed by the user, 2026-10-01)
+
+- **Q1 — Charts: CONFIRMED default.** The default is text bars with no new dependency, plus an optional matplotlib cell that silently skips if matplotlib isn't installed. The alternative is to add `matplotlib` to the `[notebook]` extra and use real charts throughout. Recommendation: the default; it keeps installation dependency-free.
+- **Q2 — Quickstart: CONFIRMED keep.** Keep `examples/quickstart.ipynb` unchanged as the full API tour (recommended), or renumber it `04_full_tour.ipynb`.

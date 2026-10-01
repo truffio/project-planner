@@ -311,6 +311,8 @@ Model errors (phase 2):
 | `CSV_PARENT_CYCLE` | Parent chain loops. | `parent_id` |
 | `CSV_ASSIGN_NON_TASK` | ASSIGNMENT targets a group or milestone. | `task_id` |
 | `CSV_DUPLICATE_ASSIGNMENT` | Repeated (`task_id`, `resource_id`). | `resource_id` |
+| `CSV_DUPLICATE_DEPENDENCY` | Repeated (`pred_id`, `succ_id`, `dep_type`) on another DEPENDENCY row; the later row is reported. | `dep_type` |
+| `CSV_BAD_ID` | ID cell contains whitespace the CSV trim does not remove (e.g. NBSP), or is otherwise not a valid model ID. | the ID column |
 | `CSV_SELF_DEPENDENCY` | `pred_id` = `succ_id`. | `succ_id` |
 | `CSV_GROUP_DEPENDENCY` | Dependency endpoint is a group. | `pred_id` or `succ_id` |
 | `CSV_CYCLE` | Dependencies form a cycle. Message lists all node IDs on the cycle in order and the lines of its dependencies, e.g. `n2 -> n3 -> n4 -> n2 (lines 10, 11, 12)`. One error per cycle, on the first dependency line, column `pred_id`. | `pred_id` |
@@ -339,6 +341,9 @@ For any valid project `p`, `import(export(p))` yields a project whose definition
 Consequently `export(import(export(p)))` equals `export(p)` byte for byte when `p` had no results.
 
 ## 9. Worked example
+
+> Note: the example below shows day values unpadded for readability. Per section 4.2 the exporter writes `*_days` columns with exactly 2 decimals (`5.00`), costs with 2 decimals, and `work_qty` / `rate_per_unit` with up to 6 decimals (trailing zeros stripped).
+
 
 The following file is `tests/fixtures/csv/valid_with_results.csv` (shown verbatim). It has two resources, a group with an effort task of 40 h split 80 %/20 %, a milestone, one dependency, and result records for a current dependency-only schedule on an 8 h calendar with `person_days` reporting. Importing it ignores the last six records (RESULT_PROJECT 1, RESULT_NODE 3, RESULT_ASSIGNMENT 2) and reports them in one `CSV_RESULTS_IGNORED` note.
 

@@ -8,7 +8,7 @@ Format: `docs/csv_format.md` (schema version 1). Every file uses the full 45-col
 |---|---|---|
 | `valid_minimal.csv` | A10 | PROJECT + CALENDAR (all four calendar cells empty) + one task. Expect `CSV_DEFAULT_APPLIED` notes for currency (`USD`), cost_report_unit (`person_days`), hours_per_day (8), working_days_per_year (220), working_weekdays (Mon-Fri), workday_start (09:00). |
 | `valid_full.csv` | A10, A16 data, round trip | Every definition record type; 3-level nesting (`001` > `020` > `021`); tasks sized in `h` and `d`; effort task `022` = 40 h with R001 80 % (rate 100) and R002 20 % (rate 50); milestone `030`; FS/SS/FF/SF with lags 0 d, 1 d, 4 h, -0.5 d, 0 h, -2 h; one holiday; one working and one nonworking exception; R003 has no rate, R004 rate 0; IDs with leading zeros; a name containing a comma (quoting). |
-| `valid_collapsed_group.csv` | A12 | `G1` > `G2` > `G3` > `G4` > leaves `L1`..`L3`; `L4` under `G2`; top-level `T9`. Test: export contains all 11 NODE rows. |
+| `valid_collapsed_group.csv` | A12 | `G1` > `G2` > `G3` > `G4` > leaves `L1`..`L3`; `L4` under `G2`; top-level `T9`. Test: export contains all 9 NODE rows. |
 | `valid_with_results.csv` | A10 (results ignored) | Definition plus 1 RESULT_PROJECT, 3 RESULT_NODE, 2 RESULT_ASSIGNMENT. Import must ignore them (info `CSV_RESULTS_IGNORED`) and yield the same definition as without them. |
 | `valid_custom_calendar.csv` | A26 | 7.5 h/day, 250 days/year, `Sun;Mon;Tue;Wed;Thu`, start 08:30. **Saved with a UTF-8 BOM and CRLF line endings** on purpose, to test lenient import. Do not normalise (if git `autocrlf` rewrites it, the BOM test still holds and CRLF is merely accepted as LF). |
 

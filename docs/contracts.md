@@ -56,3 +56,6 @@ Reference listing for Wave 1+ agents. The code in `src/project_planner/engine/{m
 
 ## engine.loading (T17)
 `LoadSegment(resource_id, start, end, percent, task_ids)` (`.overloaded` = percent > 100), `LoadBucket(resource_id, period_start, assigned_person_minutes, assigned_days, average_percent, peak_percent)`. `compute_loading(project, intervals) -> dict[resource_id, tuple[LoadSegment, ...]]` (every resource present), `overloads(loading) -> list[LoadSegment]`, `aggregate(segments, axis, "day"|"week") -> tuple[LoadBucket, ...]` (buckets only for loaded periods).
+
+## engine.leveling (T18)
+`level(project, sizing, base: Mapping[id, NodeTiming], *, minutes_per_day, config=DEFAULT_CONFIG, progress=None, cancel=None) -> LevelingOutcome`. `LevelingOutcome(timings, delays: tuple[LevelingDelay, ...], unresolved: tuple[UnresolvedOverload, ...], base_finish, leveled_finish, finish_delta_minutes)`; `LevelingDelay(task_id, minutes, cause: "resource"|"dependency")` (every delayed task, incl. ones pushed by predecessors); `UnresolvedOverload(resource_id, task_ids, start, end, percent, reason)`. `progress(fraction, message)` 0.0 → 1.0 non-decreasing; `cancel()` polled per task → raises `Cancelled`. Picklable. 10k tasks ≈ 0.1 s.

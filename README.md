@@ -277,11 +277,18 @@ A workspace belongs to the thread that opened it. In Tkinter, poll from the UI t
 
 ### In a Jupyter notebook
 
-Results, cost reports, loading views and task details display as tables. They also offer `.to_records()`, and `.to_dataframe()` if pandas is installed. [`examples/quickstart.ipynb`](examples/quickstart.ipynb) is a complete walk-through:
+Results, cost reports, loading views and task details display as tables. They also offer `.to_records()`, and `.to_dataframe()` if pandas is installed. Try these notebooks:
+
+- [`01_hello_world.ipynb`](examples/01_hello_world.ipynb) — your first schedule with two tasks and a dependency.
+- [`02_team_allocation.ipynb`](examples/02_team_allocation.ipynb) — a team of four on eight tasks; spot overloads with loading views and text bars.
+- [`03_leveling.ipynb`](examples/03_leveling.ipynb) — resource leveling by delaying tasks, and how reassigning work compares.
+- [`quickstart.ipynb`](examples/quickstart.ipynb) — a complete tour of the API.
+
+See [`examples/README.md`](examples/README.md) for how to open and test them.
 
 ```powershell
 .venv\Scripts\python -m pip install notebook
-.venv\Scripts\python -m jupyter notebook examples/quickstart.ipynb
+.venv\Scripts\python -m jupyter notebook examples/
 ```
 
 ## Running the tests

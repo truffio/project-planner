@@ -39,3 +39,10 @@ __pycache__/
 env/
 venv/
 ENV/
+
+# Secrets and local tool settings — never commit
+.env
+.env.*
+*.pem
+*.key
+.claude/settings.local.json

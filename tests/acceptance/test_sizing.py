@@ -37,7 +37,6 @@ def _a01_project():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T13: effort-mode sizing (A01)")
 def test_a01_effort_task_duration_and_individual_efforts():
     ws, t, alice, bob = _a01_project()
     res = ws.schedule()
@@ -59,7 +58,6 @@ def test_a01_effort_task_duration_and_individual_efforts():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T13: effort-mode sizing, person_hours report (A01)")
 def test_a01_person_hours_work_quantities():
     ws, t, alice, bob = _a01_project()
     ws.schedule()
@@ -71,7 +69,6 @@ def test_a01_person_hours_work_quantities():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T13: duration-mode sizing, assignment change (A02)")
 def test_a02_duration_fixed_when_allocation_changes():
     ws = new_ws()
     new_project(ws)
@@ -106,7 +103,6 @@ def test_a02_duration_fixed_when_allocation_changes():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T13: unschedulable effort task / T15 blocked (A13)")
 def test_a13_effort_task_without_allocation_is_unschedulable():
     ws = new_ws()
     new_project(ws)
@@ -157,7 +153,6 @@ def _single_task_result(**sizing):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T13: hours vs days entry give identical results (A24)")
 @pytest.mark.parametrize("mode", ["duration", "effort"])
 def test_a24_40h_and_5d_identical_at_8h_per_day(mode):
     _, _, by_hours_obj = _single_task_result(**{mode: pp.hours(40)})
@@ -171,7 +166,6 @@ def test_a24_40h_and_5d_identical_at_8h_per_day(mode):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T13: stored sizing unchanged by schedule (A24)")
 def test_a24_entered_value_and_unit_preserved_after_schedule():
     ws = new_ws()
     new_project(ws)
@@ -200,7 +194,6 @@ def test_a24_entered_value_and_unit_preserved_after_schedule():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T35: bare numbers rejected for time inputs")
 @pytest.mark.parametrize("bad", [40, 2.5, Decimal("5")])
 @pytest.mark.parametrize("field", ["duration", "effort"])
 def test_unit_less_numbers_rejected_for_sizing(field, bad):
@@ -216,7 +209,6 @@ def test_unit_less_numbers_rejected_for_sizing(field, bad):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T35: bare numbers rejected for lag")
 def test_unit_less_number_rejected_for_lag():
     ws = new_ws()
     new_project(ws)
@@ -229,7 +221,6 @@ def test_unit_less_number_rejected_for_lag():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T10: unit-less string rejected by TimeQty parser")
 def test_unit_less_string_rejected():
     ws = new_ws()
     new_project(ws)
@@ -241,7 +232,6 @@ def test_unit_less_string_rejected():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: assignment percent range (decision 4)")
 @pytest.mark.parametrize("percent", [0, -10, 150])
 def test_assignment_percent_out_of_range_rejected(percent):
     ws = new_ws()

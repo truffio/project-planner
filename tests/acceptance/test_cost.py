@@ -68,7 +68,6 @@ A16_BREAKDOWN = [
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T14: per-assignment cost (A16)")
 def test_a16_assignment_and_task_costs():
     ws, t, alice, bob = _a16()
     res = ws.schedule()
@@ -83,7 +82,6 @@ def test_a16_assignment_and_task_costs():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T34: cost report breakdown per unit (A16/A25)")
 @pytest.mark.parametrize(("unit", "a_work", "a_rate", "b_work", "b_rate", "t_work"), A16_BREAKDOWN)
 def test_a16_cost_report_in_every_unit(unit, a_work, a_rate, b_work, b_rate, t_work):
     ws, t, alice, bob = _a16()
@@ -106,7 +104,6 @@ def test_a16_cost_report_in_every_unit(unit, a_work, a_rate, b_work, b_rate, t_w
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T34: task details breakdown (A16)")
 def test_a16_task_details_show_percent_work_rate_cost():
     ws, t, alice, bob = _a16()
     ws.schedule()
@@ -135,7 +132,6 @@ def test_a16_task_details_show_percent_work_rate_cost():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T16: group and project cost rollup (A17)")
 def test_a17_nested_groups_sum_leaf_costs_once():
     ws = new_ws()
     new_project(ws)
@@ -182,7 +178,6 @@ def test_a17_nested_groups_sum_leaf_costs_once():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: rate edit recosts without touching dates (A18)")
 def test_a18_rate_change_updates_costs_only():
     ws, t, alice, bob = _a16()
     res = ws.schedule()
@@ -205,7 +200,6 @@ def test_a18_rate_change_updates_costs_only():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T14: missing rate flagged, estimate incomplete (A20)")
 def test_a20_missing_rate_makes_estimate_incomplete():
     ws, t, alice, bob = _a16(bob_rate=None)
     res = ws.schedule()
@@ -223,7 +217,6 @@ def test_a20_missing_rate_makes_estimate_incomplete():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T14: explicit zero rate is valid (A20)")
 def test_a20_explicit_zero_rate_is_complete():
     ws, t, alice, bob = _a16(bob_rate="0")
     res = ws.schedule()
@@ -245,7 +238,6 @@ def _a21():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T14: per-resource cost of duration task (A21)")
 def test_a21_duration_task_weighted_costs():
     ws, t, alice, bob = _a21()
     res = ws.schedule()
@@ -274,7 +266,6 @@ A21_BREAKDOWN = [
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T34: cost report breakdown per unit (A21/A25)")
 @pytest.mark.parametrize(("unit", "a_work", "a_rate", "b_work", "b_rate"), A21_BREAKDOWN)
 def test_a21_cost_report_in_every_unit(unit, a_work, a_rate, b_work, b_rate):
     ws, t, alice, bob = _a21()
@@ -290,7 +281,6 @@ def test_a21_cost_report_in_every_unit(unit, a_work, a_rate, b_work, b_rate):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T34: report unit changes nothing but presentation (A25)")
 def test_a25_switching_report_unit_changes_no_cost_dates_or_staleness():
     ws, t, alice, bob = _a16()
     res = ws.schedule()
@@ -318,7 +308,6 @@ def test_a25_switching_report_unit_changes_no_cost_dates_or_staleness():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: cost_report_unit given at new_project (A25)")
 def test_a25_cost_report_unit_set_at_project_creation():
     ws = new_ws()
     new_project(ws, cost_report_unit="person_hours")

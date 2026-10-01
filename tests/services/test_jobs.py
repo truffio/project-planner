@@ -412,7 +412,7 @@ def test_poll_applies_finished_jobs(ws: Workspace, gated: GatedExecutor) -> None
     assert jobs.active_jobs(ws) == (job,)
     gated.gate.set()
     wait_until(lambda: job._future.done())
-    assert ws.state().has_result is False  # nobody polled yet
+    assert ws.results.current() is None  # nobody polled yet (state() itself polls, T35)
     assert jobs.poll(ws) == [job]
     assert ws.state().has_result is True
     assert jobs.active_jobs(ws) == ()

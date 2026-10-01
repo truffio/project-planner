@@ -29,7 +29,6 @@ from .conftest import (
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T17: uncapped loading, overload flagged (A03)")
 def test_a03_overlapping_assignments_show_130_percent():
     ws = new_ws()
     new_project(ws)
@@ -62,7 +61,6 @@ def test_a03_overlapping_assignments_show_130_percent():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T17: brief overload not hidden by averaging (A03)")
 def test_a03_brief_overload_peak_vs_average():
     ws = new_ws()
     new_project(ws)
@@ -113,7 +111,6 @@ def _overloaded_project():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T18: leveling delays whole task (A07)")
 def test_a07_leveling_delays_exactly_one_whole_task():
     ws, alice, t1, t2, t3 = _overloaded_project()
     base = ws.schedule()
@@ -149,7 +146,6 @@ def test_a07_leveling_delays_exactly_one_whole_task():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T18: weekend inside a leveled task is a pause (A08)")
 def test_a08_weekend_inside_leveled_task():
     ws, alice, _, t2, _ = _overloaded_project()
     ws.schedule()
@@ -176,7 +172,6 @@ def test_a08_weekend_inside_leveled_task():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T18: leveling leaves labor cost unchanged (A19)")
 def test_a19_leveling_does_not_change_cost():
     ws, alice, t1, t2, t3 = _overloaded_project()
     base = ws.schedule()
@@ -194,7 +189,6 @@ def test_a19_leveling_does_not_change_cost():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T32: preview / discard / apply / reset state machine")
 def test_leveling_preview_apply_discard_reset_transitions():
     ws, _, _, t2, _ = _overloaded_project()
     ws.schedule()
@@ -226,7 +220,6 @@ def test_leveling_preview_apply_discard_reset_transitions():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T32: leveling never reruns automatically after edits")
 def test_leveled_schedule_goes_stale_and_is_not_releveled_silently():
     ws, _, _, t2, _ = _overloaded_project()
     ws.schedule()

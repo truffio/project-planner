@@ -37,7 +37,6 @@ def _overloaded_project(n_tasks: int):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T32: async schedule equals sync schedule (A23)")
 def test_a23_submit_schedule_matches_synchronous_schedule():
     ws, _, tasks = _overloaded_project(20)
     sync = ws.schedule()
@@ -56,7 +55,6 @@ def test_a23_submit_schedule_matches_synchronous_schedule():
 
 @pytest.mark.acceptance
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="T32: job progress reported (A23)")
 def test_a23_leveling_job_reports_progress():
     ws, _, tasks = _overloaded_project(200)
     ws.schedule()
@@ -81,7 +79,6 @@ def test_a23_leveling_job_reports_progress():
 
 @pytest.mark.acceptance
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="T32: cancelled leveling applies nothing (A23)")
 def test_a23_cancelled_leveling_applies_nothing():
     ws, _, tasks = _overloaded_project(1500)
     base = ws.schedule()
@@ -103,7 +100,6 @@ def test_a23_cancelled_leveling_applies_nothing():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T32: result arriving after an edit is stale (A23)")
 def test_a23_edit_while_job_runs_yields_stale_result():
     ws, alice, tasks = _overloaded_project(50)
     job = ws.submit_schedule()

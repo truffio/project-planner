@@ -111,7 +111,6 @@ CORRUPTIONS = {
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T33: failed import leaves workspace intact (A09)")
 @pytest.mark.parametrize("kind", sorted(CORRUPTIONS))
 def test_a09_invalid_csv_leaves_project_intact(tmp_path, kind):
     src, _, _ = _source_project()
@@ -138,7 +137,6 @@ def test_a09_invalid_csv_leaves_project_intact(tmp_path, kind):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T33: non-planner CSV rejected (A09)")
 def test_a09_garbage_file_rejected(tmp_path):
     bad = tmp_path / "garbage.csv"
     bad.write_text("hello,world\n1,2\n", encoding="utf-8")
@@ -154,7 +152,6 @@ def test_a09_garbage_file_rejected(tmp_path):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T33: unsaved-changes guard on import (A10 / spec 3.2)")
 def test_a10_import_refuses_to_discard_unsaved_work(tmp_path):
     src, _, _ = _source_project()
     path = _exported(tmp_path, src)
@@ -167,7 +164,6 @@ def test_a10_import_refuses_to_discard_unsaved_work(tmp_path):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T33: valid import replaces everything (A10)")
 def test_a10_valid_csv_replaces_project(tmp_path):
     src, src_nodes, (t1, t2) = _source_project()
     path = _exported(tmp_path, src)
@@ -180,7 +176,9 @@ def test_a10_valid_csv_replaces_project(tmp_path):
     assert sorted(r.name for r in proj.resources) == ["Alice", "Bob"]
     node_ids = {id_of(n.id) for n in proj.nodes}
     assert node_ids == {id_of(n) for n in src_nodes}
-    assert id_of(old_nodes[0]) not in node_ids
+    # IDs are auto-numbered per project, so the old task's ID ("t1") may legitimately
+    # reappear in the imported file; check the old task's content is gone instead
+    assert "Old task" not in {n.name for n in proj.nodes}
     # previous results are gone and imported result rows are not used
     assert current(ws) is None
     # calendar came from the file
@@ -224,7 +222,6 @@ def _leveled_file_project(db_path):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T33: save / reopen / load restores results (A11)")
 def test_a11_save_close_load_restores_definition_and_leveled_schedule(tmp_path):
     db = tmp_path / "plans.db"
     ws, alice, (t1, t2, t3) = _leveled_file_project(db)
@@ -273,7 +270,6 @@ def test_a11_save_close_load_restores_definition_and_leveled_schedule(tmp_path):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T33: save-as, list, unsaved guard, failed load (A11)")
 def test_a11_save_as_list_and_load_guards(tmp_path):
     db = tmp_path / "plans.db"
     ws, alice, (t1, t2, t3) = _leveled_file_project(db)
@@ -303,7 +299,6 @@ def test_a11_save_as_list_and_load_guards(tmp_path):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T33/T20: export writes every node (A12)")
 def test_a12_export_includes_all_nodes_regardless_of_ui_state(tmp_path):
     ws = new_ws()
     new_project(ws)
@@ -327,7 +322,6 @@ def test_a12_export_includes_all_nodes_regardless_of_ui_state(tmp_path):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T33/T20: export marks stale results explicitly (spec 12.2)")
 def test_export_marks_stale_results(tmp_path):
     ws = new_ws()
     new_project(ws)

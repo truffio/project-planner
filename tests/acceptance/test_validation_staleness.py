@@ -25,7 +25,6 @@ from .conftest import (
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T12: cycle error names every member (A14)")
 def test_a14_cycle_rejected_and_all_members_named():
     ws = new_ws()
     new_project(ws)
@@ -41,7 +40,6 @@ def test_a14_cycle_rejected_and_all_members_named():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T12: self-dependency rejected (A14)")
 def test_a14_self_dependency_rejected():
     ws = new_ws()
     new_project(ws)
@@ -51,7 +49,6 @@ def test_a14_self_dependency_rejected():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T12: dependency on a summary group rejected (decision 5)")
 def test_a14_dependency_on_group_rejected_naming_group():
     ws = new_ws()
     new_project(ws)
@@ -63,7 +60,6 @@ def test_a14_dependency_on_group_rejected_naming_group():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T12: dangling endpoint reference (A14)")
 def test_a14_dangling_reference_rejected():
     ws = new_ws()
     new_project(ws)
@@ -126,7 +122,6 @@ def _apply_edit(name, ws, alice, a, b):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: edits mark the schedule stale (A15)")
 @pytest.mark.parametrize("edit", STALE_EDITS)
 def test_a15_edit_after_schedule_marks_results_stale(edit):
     ws, res, alice, a, b = _scheduled_project()
@@ -144,7 +139,6 @@ def test_a15_edit_after_schedule_marks_results_stale(edit):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: recalculation reflects the edit (A15)")
 def test_a15_recalculation_replaces_stale_results():
     ws, res, alice, a, b = _scheduled_project()
     ws.set_sizing(a, duration="3d")
@@ -159,7 +153,6 @@ def test_a15_recalculation_replaces_stale_results():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: working_days_per_year edit is not stale (plan 2.3)")
 def test_working_days_per_year_change_does_not_stale_schedule():
     ws, res, alice, a, b = _scheduled_project()
     ws.calendar.set_working_days_per_year(250)

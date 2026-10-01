@@ -42,7 +42,6 @@ def _two_tasks(ws):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31/T11: calendar initialise 7.5 h, 250 d (A26)")
 def test_a26_seven_and_a_half_hour_days():
     ws = new_ws()
     new_project(ws)
@@ -73,7 +72,6 @@ def test_a26_seven_and_a_half_hour_days():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T34: working_days_per_year affects person-years only (A26)")
 def test_a26_working_days_per_year_changes_person_years_only():
     def build(wdpy):
         ws = new_ws()
@@ -101,7 +99,6 @@ def test_a26_working_days_per_year_changes_person_years_only():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: CalendarSettings at new_project (plan 2.3)")
 def test_a26_calendar_settings_passed_to_new_project():
     ws = new_ws()
     settings = pp.CalendarSettings(hours_per_day=D("7.5"), working_days_per_year=250)
@@ -113,7 +110,6 @@ def test_a26_calendar_settings_passed_to_new_project():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: hours/day edit keeps entered units (plan 2.1)")
 def test_hours_per_day_change_8_to_7_5():
     ws = new_ws()
     new_project(ws)
@@ -135,7 +131,6 @@ def test_hours_per_day_change_8_to_7_5():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T33: calendar settings survive save/load (A26)")
 def test_a26_settings_survive_save_and_load(tmp_path):
     db = tmp_path / "cal.db"
     ws = new_ws(db)
@@ -159,7 +154,6 @@ def test_a26_settings_survive_save_and_load(tmp_path):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T33/T20: calendar settings survive CSV round-trip (A26)")
 def test_a26_settings_survive_csv_round_trip(tmp_path):
     ws = new_ws()
     new_project(ws, "Cal")
@@ -170,20 +164,21 @@ def test_a26_settings_survive_csv_round_trip(tmp_path):
         holidays=[(date(2026, 10, 12), "Holiday")],
         exceptions=[(date(2026, 10, 10), "working")],
     )
+    # the CSV format requires at least one NODE record (docs/csv_format.md, CSV_MISSING_NODE)
+    ws.add_task("Task", duration="1d")
     path = tmp_path / "cal.csv"
     ws.export_csv(str(path))
     ws2 = new_ws()
     ws2.import_csv(str(path))
     assert calendar_settings(ws2) == calendar_settings(ws)
     # project setting travels too
-    assert code(ws2.cost_report().unit) == "person_days"
+    assert code(ws2.project().cost_report_unit) == "person_days"
 
 
 # ---------------------------------------------------------------- A27
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: initialize() defaults (plan 2.3)")
 def test_initialize_without_arguments_gives_defaults():
     ws = new_ws()
     new_project(ws)
@@ -207,7 +202,6 @@ def _initialised_nondefault(ws):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: invalid combination applies nothing (A27)")
 def test_a27_invalid_combination_applies_nothing_and_names_each_field():
     ws = new_ws()
     new_project(ws)
@@ -223,7 +217,6 @@ def test_a27_invalid_combination_applies_nothing_and_names_each_field():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: each invalid parameter identified (A27)")
 def test_a27_several_independent_bad_fields_all_reported():
     ws = new_ws()
     new_project(ws)
@@ -243,7 +236,6 @@ def test_a27_several_independent_bad_fields_all_reported():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T31: single-field calendar validation (A27)")
 @pytest.mark.parametrize(
     ("kwargs", "field"),
     [

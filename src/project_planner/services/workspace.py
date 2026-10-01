@@ -35,11 +35,12 @@ import re
 import sqlite3
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
+from concurrent.futures import Executor
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import TracebackType
-from typing import Any, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TextIO, TypeVar
 
 from project_planner.engine import config as _cfg
 from project_planner.engine.config import DEFAULT_CONFIG, Config
@@ -71,7 +72,7 @@ from project_planner.engine.model import (
     as_time_qty,
 )
 from project_planner.engine.network import cycle_issue
-from project_planner.engine.results import ScheduleResult
+from project_planner.engine.results import LevelingResult, ScheduleResult
 from project_planner.persistence import repositories as repo
 from project_planner.persistence import row_ops
 from project_planner.persistence.db import connect, transaction
@@ -81,11 +82,27 @@ from project_planner.services.dto import DeletePreview, WorkspaceState
 from project_planner.services.events import Callback, Event, EventBus, EventKind
 from project_planner.services.result_store import ResultStore
 
+if TYPE_CHECKING:
+    from project_planner.services.files import ImportSummary, ProjectInfo
+    from project_planner.services.jobs import Job
+    from project_planner.services.read_models import (
+        CostReportView,
+        GanttRow,
+        Link,
+        LoadingView,
+        ProjectSummary,
+        TaskDetails,
+        WbsPage,
+    )
+
 __all__ = ["CalendarApi", "Workspace", "open_workspace"]
 
 _ID_RE = re.compile(r"^([A-Za-z_]+)(\d+)$")
 
 _NODE_PREFIX = {NodeKind.GROUP: "g", NodeKind.TASK: "t", NodeKind.MILESTONE: "m"}
+
+
+_R = TypeVar("_R", ScheduleResult, ScheduleResult | None)
 
 
 class _HasId(Protocol):
@@ -468,8 +485,22 @@ class Workspace:
             self._fp_cache = cached
         return cached[1], cached[2]
 
+    def _named(self, result: _R) -> _R:
+        """Attach node names to ``result`` for notebook display (no effect on its value)."""
+        if result is not None:
+            from project_planner import notebook
+
+            notebook.attach_names(result, self._project, self._revision)
+        return result
+
+    def _poll_jobs(self) -> None:
+        from project_planner.services import jobs
+
+        jobs.poll(self)
+
     def state(self) -> WorkspaceState:
         """Revision, dirty flag and staleness of the stored results."""
+        self._poll_jobs()
         runs = self._results.fingerprints()
         stale_dates = stale_costs = False
         if runs:
@@ -491,18 +522,188 @@ class Workspace:
         It may be stale; compare with :meth:`state`.
         """
         self._check_open()
-        return self._results.current()
+        self._poll_jobs()
+        return self._named(self._results.current())
 
-    # DELEGATION POINT (T32, ``services/compute.py``): ``schedule()``,
-    # ``level_preview()``, ``submit_schedule()``, ``submit_leveling_preview()``,
-    # ``apply_leveling()``, ``discard_leveling()``, ``reset_to_dependency_schedule()``.
-    # They are added here as thin methods calling the compute module, and persist
-    # with ``store_result`` / ``discard_results`` below.
+    # ---- facade delegation (T35): compute, jobs, files, read models
 
-    # DELEGATION POINT (T33, ``services/files.py``): ``save()``, ``save_as()``,
-    # ``load()``, ``list_projects()``, ``delete_project()``, ``import_csv()``,
-    # ``export_csv()``. ``new_project`` below is already implemented because the
-    # calendar tests need it; T33 may wrap it.
+    def schedule(self) -> ScheduleResult:
+        """Synchronously compute and store the dependency-only schedule."""
+        from project_planner.services import compute
+
+        return self._named(compute.schedule(self))
+
+    def level_preview(self) -> LevelingResult:
+        """Synchronously compute and store a leveling preview."""
+        from project_planner.services import compute
+
+        out = compute.level_preview(self)
+        self._named(out.result)
+        return out
+
+    def apply_leveling(self) -> ScheduleResult:
+        """Make the stored preview the current (leveled) result."""
+        from project_planner.services import compute
+
+        return self._named(compute.apply_leveling(self))
+
+    def discard_leveling(self) -> None:
+        """Drop the stored leveling preview."""
+        from project_planner.services import compute
+
+        compute.discard_leveling(self)
+
+    def reset_to_dependency_schedule(self) -> ScheduleResult | None:
+        """Drop leveling and return to the dependency-only result (never recalculates)."""
+        from project_planner.services import compute
+
+        return self._named(compute.reset_to_dependency_schedule(self))
+
+    def submit_schedule(self, *, executor: Executor | None = None) -> Job:
+        """Start scheduling in the background; returns a :class:`Job`."""
+        from project_planner.services import jobs
+
+        return jobs.submit_schedule(self, executor=executor)
+
+    def submit_leveling_preview(self, *, executor: Executor | None = None) -> Job:
+        """Start a leveling preview in the background; returns a :class:`Job`."""
+        from project_planner.services import jobs
+
+        return jobs.submit_leveling_preview(self, executor=executor)
+
+    def poll_jobs(self) -> list[Job]:
+        """Store results of finished jobs; returns the jobs that finished in this call."""
+        from project_planner.services import jobs
+
+        return jobs.poll(self)
+
+    def save(self) -> ProjectInfo:
+        """Save the project to the library (overwrites its tracked saved copy)."""
+        from project_planner.services import files
+
+        return files.save(self)
+
+    def save_as(self, name: str) -> ProjectInfo:
+        """Save the project under a new library ``name``."""
+        from project_planner.services import files
+
+        return files.save_as(self, name)
+
+    def list_projects(self) -> list[ProjectInfo]:
+        """Saved projects, newest first."""
+        from project_planner.services import files
+
+        return files.list_projects(self)
+
+    def import_csv(
+        self, source: str | Path | TextIO, *, discard_unsaved: bool = False
+    ) -> ImportSummary:
+        """Replace the project by a CSV file (path, CSV text or open file)."""
+        from project_planner.services import files
+
+        return files.import_csv(self, source, discard_unsaved=discard_unsaved)
+
+    def export_csv(self, destination: str | Path | None = None) -> str:
+        """CSV text of the project; written to ``destination`` when given."""
+        from project_planner.services import files
+
+        return files.export_csv(self, destination)
+
+    def cost_report(self, unit: WorkUnit | str | None = None) -> CostReportView:
+        """Cost report of the current result in ``unit`` (``Conflict`` without a result)."""
+        from project_planner.services import read_models
+
+        return read_models.cost_report(self, unit)
+
+    def task_details(self, task: str | _HasId, unit: WorkUnit | str | None = None) -> TaskDetails:
+        """Detail panel data of one task."""
+        from project_planner.services import read_models
+
+        return read_models.task_details(self, _id_of(task), unit)
+
+    def loading(
+        self,
+        resource: str | _HasId,
+        *,
+        time_window: tuple[dt.datetime, dt.datetime] | None = None,
+        granularity: Literal["segments", "day", "week"] = "segments",
+    ) -> LoadingView:
+        """Loading of one resource from the current result."""
+        from project_planner.services import read_models
+
+        return read_models.loading(
+            self, _id_of(resource), time_window=time_window, granularity=granularity
+        )
+
+    def wbs_rows(
+        self,
+        *,
+        parent: str | _HasId | None = None,
+        expanded_ids: Collection[str] = frozenset(),
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> WbsPage:
+        """Windowed visible WBS rows."""
+        from project_planner.services import read_models
+
+        return read_models.wbs_rows(
+            self,
+            parent_id=None if parent is None else _id_of(parent),
+            expanded_ids=expanded_ids,
+            offset=offset,
+            limit=limit,
+        )
+
+    def gantt_rows(
+        self,
+        *,
+        expanded_ids: Collection[str] = frozenset(),
+        offset: int = 0,
+        limit: int | None = None,
+        time_window: tuple[dt.datetime, dt.datetime] | None = None,
+    ) -> list[GanttRow]:
+        """Gantt rows aligned with :meth:`wbs_rows`."""
+        from project_planner.services import read_models
+
+        return read_models.gantt_rows(
+            self,
+            expanded_ids=expanded_ids,
+            offset=offset,
+            limit=limit,
+            time_window=time_window,
+        )
+
+    def dependency_links(self, nodes: Iterable[str | _HasId]) -> list[Link]:
+        """Dependencies whose both ends are among ``nodes``."""
+        from project_planner.services import read_models
+
+        return read_models.dependency_links(self, nodes)
+
+    def nonworking_ranges(self, start: dt.date, end: dt.date) -> list[tuple[dt.date, dt.date]]:
+        """Inclusive merged nonworking date ranges between ``start`` and ``end``."""
+        from project_planner.services import read_models
+
+        return read_models.nonworking_ranges(self, start, end)
+
+    def project_summary(self) -> ProjectSummary:
+        """Summary figures of the project and its current result."""
+        from project_planner.services import read_models
+
+        return read_models.project_summary(self)
+
+    def load(self, project_id: int | str | _HasId, *, discard_unsaved: bool = False) -> None:
+        """Load a saved project (``UnsavedChanges`` if dirty unless ``discard_unsaved``)."""
+        from project_planner.services import files
+
+        pid = project_id if isinstance(project_id, int | str) else _id_of(project_id)
+        files.load(self, pid, discard_unsaved=discard_unsaved)
+
+    def delete_project(self, project_id: int | str | _HasId) -> None:
+        """Delete a saved project from the library."""
+        from project_planner.services import files
+
+        pid = project_id if isinstance(project_id, int | str) else _id_of(project_id)
+        files.delete_project(self, pid)
 
     def store_result(self, result: ScheduleResult) -> None:
         """Persist ``result`` as the stored run of its kind (see ``result_store`` rules).

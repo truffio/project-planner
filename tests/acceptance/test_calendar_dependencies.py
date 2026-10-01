@@ -41,7 +41,6 @@ def _lag(spec: str, as_object: bool):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T11: holiday excluded from working time (A04)")
 def test_a04_task_crossing_holiday_finishes_later_and_has_no_load_on_holiday():
     ws = new_ws()
     new_project(ws)
@@ -69,7 +68,6 @@ def test_a04_task_crossing_holiday_finishes_later_and_has_no_load_on_holiday():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T11: fractional days and lag across a holiday (A04)")
 def test_a04_fractional_chain_and_lag_across_holiday():
     ws = new_ws()
     new_project(ws)
@@ -93,7 +91,6 @@ def test_a04_fractional_chain_and_lag_across_holiday():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T11: working / nonworking date exceptions")
 def test_calendar_exceptions_working_saturday_and_nonworking_weekday():
     ws = new_ws()
     new_project(ws)
@@ -109,7 +106,6 @@ def test_calendar_exceptions_working_saturday_and_nonworking_weekday():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T11: start on nonworking day moves to next boundary")
 def test_project_start_on_weekend_moves_to_next_working_boundary():
     ws = new_ws()
     new_project(ws, start=date(2026, 10, 3))  # Saturday
@@ -169,7 +165,6 @@ A05_CASES = [
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T15: forward pass, each type x signed lag (A05)")
 @pytest.mark.parametrize(("dep_type", "lag", "as_object", "start", "finish"), A05_CASES)
 def test_a05_dependency_type_and_lag(dep_type, lag, as_object, start, finish):
     res, _, s = _a05_project(dep_type, _lag(lag, as_object))
@@ -179,7 +174,6 @@ def test_a05_dependency_type_and_lag(dep_type, lag, as_object, start, finish):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T15: negative lag clamped at project start (A05)")
 @pytest.mark.parametrize(
     ("dep_type", "lag"),
     [
@@ -196,7 +190,6 @@ def test_a05_negative_lag_never_precedes_project_start(dep_type, lag):
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T15: lag echoed in days (A05)")
 def test_a05_lag_echoed_in_days():
     ws = new_ws()
     new_project(ws)
@@ -213,7 +206,6 @@ def test_a05_lag_echoed_in_days():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T15: several predecessors, binding one is last (A06)")
 def test_a06_three_predecessors_last_one_binds():
     ws = new_ws()
     new_project(ws)
@@ -235,7 +227,6 @@ def test_a06_three_predecessors_last_one_binds():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T15: several predecessors, binding one is middle (A06)")
 def test_a06_three_predecessors_middle_one_binds():
     ws = new_ws()
     new_project(ws)
@@ -254,7 +245,6 @@ def test_a06_three_predecessors_middle_one_binds():
 
 
 @pytest.mark.acceptance
-@pytest.mark.xfail(strict=True, reason="T19: plan section 1.2 example end to end (A05/A16)")
 def test_plan_section_1_2_example():
     ws = new_ws()
     ws.new_project("Demo", start=PROJECT_START, currency="USD", cost_report_unit="person_days")

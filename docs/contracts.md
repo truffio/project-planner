@@ -27,3 +27,23 @@ Reference listing for Wave 1+ agents. The code in `src/project_planner/engine/{m
 
 ## tests/fixtures/builders.py
 `from fixtures.builders import ProjectBuilder, dec, DEFAULT_START` (2026-10-05). Fluent: `.calendar(**from_values_args)`, `.resource(id, name, *, rate)`, `.group(...)`, `.task(id, name, *, parent, duration, effort, order)`, `.milestone(...)`, `.node(WbsNode)`, `.assign(task, res, percent=100)`, `.dep(pred, succ, type="FS", *, lag="0d", id)`, `.last_id`, `.build()`. Auto IDs g1/t1/m1/r1/d1; no cross-reference checks (tests may build invalid graphs).
+
+## engine.calendar (T11)
+`WorkingAxis(calendar: Calendar, start: date)`: `.issues` (INFO `CAL_START_MOVED` when start is nonworking), `.origin` (date of minute 0), `.minutes_per_day`, `.is_working_day(d)`, `.day_index(minute)`, `.working_date(index)`, `.first_working_minute(d)`, `.to_axis(dt) -> int` (clamps; never raises), `.to_datetime(minute, "start"|"finish") -> datetime` (at a day boundary "start" = next day 09:00, "finish" = previous day 17:00; minute 0 "finish" = origin start), `.nonworking_ranges(dt_from, dt_to) -> list[(date, date)]` (inclusive, merged).
+
+## engine.network / engine.validation (T12)
+- `validate(project, config=DEFAULT_CONFIG) -> list[Issue]` (all issues, sorted by object_type, object_id, field, code); `ensure_valid(project, config)` raises `ValidationFailed` with errors only; `schedule_blocking(issues) -> bool`.
+- Codes (error unless noted): `DEP_DANGLING`, `DEP_SELF`, `DEP_GROUP_ENDPOINT`, `DEP_DUPLICATE`, `DEP_CYCLE` (object_type node, all members in message), `NODE_PARENT_DANGLING`, `NODE_PARENT_NOT_GROUP`, `NODE_PARENT_CYCLE`, `ASSIGN_TASK_DANGLING`, `ASSIGN_NOT_TASK`, `ASSIGN_RESOURCE_DANGLING`, `ASSIGN_PERCENT_RANGE`; warnings `COST_MISSING_RATE`, `TASK_UNSIZED`, `TASK_NO_CAPACITY`.
+- `DirectedGraph(nodes, edges)` (`.successors`, `.strongly_connected_components()`, `.cycles()`), `DependencyGraph(project)` (`.topological_order()`), `topological_order(project) -> list[str]` (tasks + milestones; ties by WBS order then id; raises `DEP_CYCLE`), `cycle_issue(members)`.
+
+## engine.sizing (T13)
+`compute_sizing(project) -> dict[str, TaskSizing]` (tasks + milestones), `size_node(node, assignments, minutes_per_day)`. `TaskSizing(node_id, duration_minutes: int | None, effort_person_minutes: Decimal | None, capacity: Decimal, issues, schedulable)`. Unschedulable → durations None with error-severity `TASK_UNSIZED` / `TASK_NO_CAPACITY` (the same codes appear as warnings from `validate()`; result assembly (T19) keeps one entry per (code, object_id), preferring the error).
+
+## engine.cost (T14)
+`compute_costs(project, durations: Mapping[str, int | None]) -> CostResult`; `AssignmentCost(task_id, resource_id, percent, fraction, assignment_minutes, assignment_hours, hourly_rate, cost, cost_complete)`, `TaskCost(task_id, cost, cost_complete, assignments, missing_rate_resources, hours)`, `GroupCost(group_id, cost, cost_complete, hours)`, `CostResult(tasks, groups, total, complete, missing_rate_resources, total_hours)`. `cost_report(costs, project, unit=None) -> CostReport` with `AssignmentRow/TaskRow/GroupRow(work_qty, work_unit, rate_per_unit, cost, ...)`. `round_money(value, config)`.
+
+## persistence (T30)
+- `db.connect(path | ":memory:", *, check_same_thread=True)` (FKs on, WAL for files, autocommit); `db.transaction(conn)` re-entrant (nested → savepoint), maps `IntegrityError` → `Conflict`.
+- `migrations.migrate(conn) -> int`, `schema_version(conn)`, `LATEST_VERSION = 1`.
+- `repositories` (conn first): `create_project(project, kind, name=None, *, saved_at=None) -> pk`, `create_workspace(project) -> pk`, `get_workspace_pk() -> pk | None`, `get_project_record(pk) -> ProjectRecord`, `bump_revision(pk) -> int`, `list_saved_projects() -> [(pk, name, saved_at)]` newest first, `delete_saved_project(pk)`, `save_project(pk, project)` (does not touch revision/runs), `load_project(pk) -> Project`, `copy_project(src_pk, dst_pk=None, *, kind, name, saved_at=None) -> pk` (overwriting a destination bumps its revision), `save_run(project_pk, run, nodes, assignments, segments, issues) -> run_pk`, `load_runs(project_pk, kind=None) -> list[RunBundle]`, `delete_runs(project_pk, kind=None) -> int`.
+- `records`: `RunKind`, `ProjectRecord`, `ScheduleRunRecord`, `NodeResultRecord`, `AssignmentResultRecord`, `LoadingSegmentRecord`, `RunBundle(run, nodes, assignments, segments, issues)`. Minutes as int, Decimals as exact TEXT; `projects.name` = library name (saved-name uniqueness), `project_name` = `Project.name`.

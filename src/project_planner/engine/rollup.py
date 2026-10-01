@@ -72,9 +72,7 @@ def wbs_numbers(project: Project) -> dict[str, str]:
         numbers[n.id] = num
         ch = kids.get(n.id)
         if ch:
-            stack.extend(
-                (c, f"{num}.{i}") for i, c in reversed(list(enumerate(ch, 1)))
-            )
+            stack.extend((c, f"{num}.{i}") for i, c in reversed(list(enumerate(ch, 1))))
     return numbers
 
 

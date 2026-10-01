@@ -1,12 +1,12 @@
 # Project Planner — Functional Specification
 
-Version: 1.2 draft  
-Date: 2026-09-30  
+Version: 1.3 draft  
+Date: 2026-10-01  
 Status: Functional scope established; open decisions identified in Section 14. No implementation included.
 
 ## 1. Purpose
 
-Provide a locally hosted, browser-based project planning tool analogous to the planning functions of Microsoft Project. Users define a work breakdown structure (WBS), task durations or effort, dependencies, resources, assignments, and a shared work calendar. The application calculates the project completion date and resource loading, identifies overloads, and offers user-requested resource leveling.
+Provide a locally hosted, desktop project planning tool analogous to the planning functions of Microsoft Project. Users define a work breakdown structure (WBS), task durations or effort, dependencies, resources, assignments, and a shared work calendar. The application calculates the project completion date and resource loading, identifies overloads, and offers user-requested resource leveling.
 
 The application supports planning only. Progress tracking, actual work, and baseline comparisons are outside this version.
 
@@ -14,12 +14,12 @@ The application supports planning only. Progress tracking, actual work, and base
 
 | Layer | Technology | Responsibility |
 |---|---|---|
-| Browser interface | Vanilla JavaScript, HTML, and CSS | Editing, Gantt display, resource charts, project actions |
-| API | Python with FastAPI | Validate requests and coordinate project operations |
+| Desktop interface | Python Tkinter/ttk | Editing, Gantt display, resource charts, project actions |
+| Application services | Python modules | Validate requests and coordinate project operations |
 | Scheduling engine | Independent Python modules | Calendar calculations, dependency scheduling, resource loading, leveling |
 | Persistence | SQLite | Store complete project data and calculated results |
 
-The application shall run locally and be accessible through a browser. Frontend files shall be served directly by the Python/FastAPI application. The frontend shall require no Node.js, npm, frontend package installation, bundler, or compilation step on the user’s laptop. It shall use native browser APIs and locally served assets; it shall not require external CDN resources at runtime. The Gantt and resource charts shall be implemented using native HTML, CSS, SVG, or canvas. Python backend dependencies remain necessary and are separate from this frontend constraint. Scheduling rules shall reside in the Python backend and shall not depend on the frontend. Public hosting, authentication, and simultaneous multi-user editing are outside the initial scope. The exact local launch and installation procedure will be defined during implementation.
+The application shall run locally as a desktop application with a Tkinter user interface. It shall require only a standard Python installation or a packaged executable, and no web browser, web server, Node.js, npm, or frontend build step. The Gantt and resource charts shall be implemented with native Tkinter widgets (Canvas). The user interface shall call scheduling and persistence functions through an application-service layer and shall not contain scheduling rules. Scheduling rules shall reside in independent Python modules that do not depend on the user interface. Long-running operations shall not block the interface. Public hosting, authentication, and simultaneous multi-user editing are outside the initial scope.
 
 ## 3. Project lifecycle
 
@@ -133,7 +133,7 @@ If the selected project start falls on a nonworking day, the proposed behavior i
 
 ## 7. Dependencies
 
-A task or milestone shall support multiple predecessors and successors. Each dependency shall reference stable endpoint IDs, one relationship type, and a signed working-time offset. Users shall add, edit, and remove dependencies through the frontend.
+A task or milestone shall support multiple predecessors and successors. Each dependency shall reference stable endpoint IDs, one relationship type, and a signed working-time offset. Users shall add, edit, and remove dependencies through the user interface.
 
 | Relationship | Zero-offset constraint |
 |---|---|
@@ -199,7 +199,7 @@ The operation shall report delayed tasks, the added delay, the resulting project
 
 Edits that invalidate a leveled schedule shall mark it stale. Leveling shall not silently rerun after edits.
 
-## 11. Browser interface
+## 11. User interface
 
 ### 11.1 Main planning view
 
@@ -215,7 +215,7 @@ Gantt bars shall not be draggable or resizable. Dates are schedule outputs rathe
 
 ### 11.3 Additional editors and actions
 
-The interface shall provide project settings, calendar editing, resource management, task properties, dependency editing, save/load, CSV import/export, scheduling, and leveling. Validation errors shall identify the affected field or object. Long operations shall display progress or a busy state without freezing the interface.
+The interface shall provide project settings, calendar editing, resource management, task properties, dependency editing, save/load, CSV import/export, scheduling, and leveling. Validation errors shall identify the affected field or object. Long operations shall display progress or a busy state without freezing the interface. Closing the application window shall offer the same save/discard opportunity as loading another project.
 
 ## 12. CSV import and export
 
@@ -225,7 +225,7 @@ Import shall reset the entire active project definition and replace it with the 
 
 The full file shall be parsed and validated before replacement is committed. Failed import shall preserve the existing project. The user shall see a replacement summary and the unsaved-work handling described in Section 3.
 
-Dependencies may be supplied by the import format or entered afterward through the frontend. Calculated dates in a CSV shall not override scheduling rules when imported; saved-project loading is the mechanism for restoring an exact working state.
+Dependencies may be supplied by the import format or entered afterward through the user interface. Calculated dates in a CSV shall not override scheduling rules when imported; saved-project loading is the mechanism for restoring an exact working state.
 
 ### 12.2 Export
 
@@ -262,7 +262,8 @@ The agreed reset behavior requires a fresh policy for information omitted from t
 | A19 | Leveling delays tasks without changing work or assignments | Project labor cost unchanged |
 | A20 | Assigned resource has no hourly rate | Missing rate identified; total estimate marked incomplete |
 | A21 | 16-hour duration task; Alice 75% at $100/hour, Bob 25% at $60/hour | Alice contributes 12 hours/$1,200; Bob 4 hours/$240; task total $1,440 |
-| A22 | Launch frontend on a laptop without Node.js or npm | Locally served interface runs without frontend installation or compilation |
+| A22 | Launch on a Windows laptop with a standard Python installation, or from the packaged executable | Application window opens without installing Node.js, npm, a browser, or any frontend build step |
+| A23 | Leveling or scheduling a large project | Interface stays responsive, shows progress, and permits cancellation; a cancelled run applies no partial result |
 
 ## 14. Open decisions and exclusions
 
@@ -280,6 +281,6 @@ The agreed reset behavior requires a fresh policy for information omitted from t
 
 ### Outside the initial scope
 
-Critical path display, actual-work and progress tracking, baselines, budget targets and nonlabor costs, per-resource calendars, task splitting, automatic leveling after edits, editable Gantt bars, public deployment, and simultaneous multi-user collaboration are outside the initial scope. Additional date constraints and backward scheduling require a separate scope decision.
+Critical path display, actual-work and progress tracking, baselines, budget targets and nonlabor costs, per-resource calendars, task splitting, automatic leveling after edits, editable Gantt bars, public deployment, simultaneous multi-user collaboration, and a browser-based interface (a later version may add one over the same application-service layer) are outside the initial scope. Additional date constraints and backward scheduling require a separate scope decision.
 
 This specification defines intended functionality. It does not select a scheduling package or imply that any third-party package already implements the agreed rules.

@@ -1,0 +1,473 @@
+# Project Planner — Proposed Backend Architectures
+
+Source: `Project_Planner_Functional_Specification.md` (v1.2 draft, 2026-09-30)
+Scope: backend only (FastAPI API, Python scheduling engine, SQLite persistence). The frontend is out of scope here. Where an architecture affects the frontend contract, this document notes it.
+Status: proposal only. No code yet.
+
+> **Update:** a desktop alternative is under consideration. In it, a Tkinter UI replaces the browser interface and FastAPI is optional. Sections 1–7 describe the original web-based setup. **Section 8** explains how each architecture changes for a Tkinter desktop UI. **Section 9** drafts the spec changes this would need. The engine design in Section 1 stays the same.
+
+---
+
+## 0. Constraints from the spec that all three options must meet
+
+| Constraint | Spec ref |
+|---|---|
+| Python + FastAPI API, SQLite persistence, local-only, serves static frontend files | §2 |
+| Scheduling rules live in independent Python modules with no dependency on API, DB, or frontend | §2 |
+| Save/load restores definition and calculated results exactly, without silently rescheduling | §3.2, A11 |
+| A failed save, load, or import leaves the working project intact | §3.2, §12.1, A09 |
+| Unsaved-changes indicator; stale-result tracking; stale results never exported as current | §3.2, §8, §12.2, A15 |
+| Fractional working time, shared calendar, four dependency types with signed working-time lag | §6, §7 |
+| Uncapped resource loading, overload intervals, per-assignment costs, completeness status | §5.5, §9 |
+| Leveling only on request; whole-task delays; must terminate and explain unresolvable overloads | §10 |
+| No arbitrary task-count limit; long operations must not freeze the UI | §4.1, §11.3 |
+
+---
+
+## 1. Shared foundation: the scheduling engine
+
+All three architectures use the same engine design. They differ in how the engine is hosted, how state is held, and how data is persisted. The engine is a pure Python package (`planner_engine`). It imports nothing from FastAPI, SQLite, or any I/O library, so it can be unit-tested directly against acceptance scenarios A01–A21.
+
+### 1.1 Key design idea: a working-time axis
+
+The calendar is shared by every task and resource (§6), so the engine can map calendar time onto a single monotonic **working-time axis**. On that axis, position 0 is the first working instant on or after the project start, and the unit is integer working minutes. Seconds are also possible; see open decision 7.
+
+- **Durations and lags are plain additions and subtractions on the axis.** "Start + 12 working hours" needs no calendar walking.
+- **Weekends and holidays disappear from scheduling math.** They come back only when converting axis positions to calendar datetimes for output (A04, A08).
+- **Integer units avoid float drift.** Fractional days (1.5 days = 720 min on an 8 h calendar) stay exact. Effort / sum(fractions) is the only division, and it is rounded once with a documented rule.
+- **Resource capacity is uniform per axis unit**, because there are no per-resource calendars. Leveling and loading therefore also work purely on the axis.
+- **Boundary convention:** tasks occupy half-open intervals `[start, finish)`. An FS successor with zero lag starts at exactly `pred.finish` (§6). One axis instant at a day boundary maps to two calendar readings ("end of Mon" = "start of Tue"). The output layer picks one display convention (open decision 7) without affecting the math.
+
+### 1.2 Engine modules
+
+| Module | Responsibility |
+|---|---|
+| `model` | Immutable dataclasses: `Project`, `Calendar`, `WbsNode` (group/task/milestone), `Resource`, `Assignment`, `Dependency`. Stable string IDs, so `"001"` is preserved (§12.3). |
+| `calendar` | Builds the working-time axis from weekdays, hours/day, holidays, and exceptions. Provides `to_axis(datetime)`, `to_datetime(axis, boundary=start/finish)`, and the next-working-boundary rule for a nonworking project start (§6). |
+| `validation` | Structural checks with object/field-addressed errors: dangling refs, self-dependencies, duplicate person per task, ranges, missing rates. Cycle detection uses Tarjan SCC and reports every node in each cycle (§7, A14). |
+| `sizing` | Duration-based: `D` given, `effort = D × Σa`. Effort-based: `D = E / Σa`. If Σa ≤ 0, the task is unschedulable with a reason (A01, A02, A13). |
+| `network` | Dependency graph and topological order. Prepared for group endpoints if open decision 5 allows them, by expanding them to their leaf descendants. |
+| `forward_pass` | For each node in topological order: `start = max(0, FS: pf+lag, SS: ps+lag, FF: pf+lag−D, SF: ps+lag−D)`, then `finish = start + D`. All constraints are satisfied together, and negative lag can never go before project start (§7, A05, A06). Unschedulable predecessors make their successors "blocked" (incomplete result). |
+| `rollup` | Group start/finish as min/max of descendants, and group effort/cost as sums over leaf tasks only (§4.2, A17). |
+| `loading` | Sweep-line over assignment interval endpoints for each resource, producing piecewise-constant loading segments with contributing task IDs. Overloads are segments > 100% (§9, A03). Daily/weekly aggregates report average, peak, and assigned hours separately. |
+| `cost` | Per assignment: `hours = D × a`, `cost = hours × rate`. These are summed per task, per group (leaves only), and per project. Completeness is tracked: a missing rate gives "incomplete", and an explicit 0 is valid (§5.5, A16, A18–A21). Uses `Decimal` with a single rounding policy (open decision 9). |
+| `leveling` | Serial schedule-generation scheme. Tasks are taken in topological order with a pluggable priority/tie-break strategy (open decision 1). Each task is placed at the earliest axis point ≥ its dependency-earliest start where adding its loads keeps every resource ≤ 100% over `[s, s+D)`. Candidate points are the finite set of interval endpoints, so the scheme always terminates. If a task's own allocation for one person exceeds 100%, it is placed at its dependency-earliest start and reported as unresolvable (§10). Output: per-task `leveling_delay`, new finish, and list of unresolved overloads (A07, A08, A19). |
+| `results` | `ScheduleResult` holds per-node dates on the axis and in calendar time, durations, effort, costs, status, errors, project working span vs. elapsed span, completeness, and an `input_fingerprint`. |
+| `csv_io` | Parses a single record-type CSV (`PROJECT`, `CALENDAR`, `HOLIDAY`, `EXCEPTION`, `RESOURCE`, `NODE`, `ASSIGNMENT`, `DEPENDENCY`, with a schema version) into a complete `Project` or a list of row/field errors. Export writes the definition plus results and staleness flags (§12, A09, A10, A12). The engine works on text streams only, with no file I/O. |
+
+### 1.3 Staleness model (shared)
+
+Every result carries an `input_fingerprint`: a hash of the canonicalized inputs it was computed from. It has two parts:
+
+- `schedule_fp` covers the calendar, start date, sizing, assignments, and dependencies.
+- `cost_fp` covers `schedule_fp` plus the rates.
+
+A result is *current* only if its fingerprint matches the live project. This handles §8 and A15 without hand-maintained invalidation flags. It also lets a rate edit (A18) invalidate costs but not dates. Costs are cheap to recompute, so they can be refreshed immediately even if scheduling is button-driven.
+
+Two schedules are kept: the **dependency-only** schedule and an optional **leveled** schedule. Keeping both supports preview/apply/discard and "return to dependency-only schedule" (§10).
+
+---
+
+## 2. Architecture A — Stateless calculation service + document persistence
+
+### 2.1 Summary
+
+The backend keeps no working-project state between requests. The **frontend holds the working project** as a JSON document. The backend has two jobs: a pure calculation/validation service and a document store. Each calculate request sends the full project and gets back the full result.
+
+```
+Browser (working copy JSON, dirty flag)
+   │  POST /api/schedule {project}       → ScheduleResult
+   │  POST /api/level    {project, ...}  → LevelingPreview
+   │  POST /api/validate {project}       → errors[]
+   │  POST /api/csv/import (file)        → {project} | errors[]
+   │  POST /api/csv/export {project, results} → text/csv
+   │  GET/PUT/POST/DELETE /api/projects[/{id}] → saved documents
+   ▼
+FastAPI routers ──► Pydantic DTOs ◄─► engine.model mappers ──► planner_engine
+        │
+        └─► ProjectStore (sqlite3) ── table: projects(id, name, schema_version,
+                                       definition_json, results_json, saved_at, revision)
+```
+
+### 2.2 Components
+
+- **API layer:** a few coarse endpoints. Pydantic v2 models define the JSON contract and are versioned (`schema_version`).
+- **Persistence:** one `projects` table, plus maybe a `project_meta` table for the picker. Definition and results are stored as JSON columns. Save is a single-row UPSERT in a transaction, and Save As inserts a new row. Optimistic concurrency uses a `revision` column, mainly to guard against two browser tabs.
+- **Long operations:** leveling runs in `run_in_threadpool` or a `ProcessPoolExecutor` so the event loop stays free. The frontend shows a busy state while the request is in flight.
+
+### 2.3 Strengths
+
+- Simplest backend. Almost every endpoint is a pure function: `f(project) → result`. Very easy to test, and there is no server-side session to lose.
+- Save/load fidelity is trivial: the stored document is exactly what was calculated (A11).
+- Failed import/load leaves the project intact automatically. The backend never touches the frontend's working copy unless the call succeeds (A09).
+- Restarting the server loses nothing in flight.
+
+### 2.4 Weaknesses
+
+- **Moves domain state management into vanilla JS:** WBS tree edits, dirty tracking, ID generation, and deletion-impact analysis (§4.1) all live in the frontend. That is a lot of logic without a framework, and some of it duplicates backend validation.
+- The full project is sent on every calculation. This is fine for hundreds or low thousands of tasks, but it scales poorly for very large WBS (open decision 8).
+- No incremental recalculation. Every calculation is a full rebuild. That is acceptable but not optimal.
+- Unsaved work exists only in the browser tab. A closed tab or a crash loses it, unless the frontend also uses `localStorage`.
+- JSON blobs make ad-hoc SQL queries over projects hard. This barely matters for a local tool.
+
+### 2.5 Best fit
+
+Small-to-medium projects. The team wants the smallest, most testable backend and accepts a richer frontend state layer.
+
+---
+
+## 3. Architecture B — Server-side working copy, normalized relational model, resource-oriented API
+
+### 3.1 Summary
+
+The **backend is the source of truth** for the working project. SQLite holds normalized tables for each project, and the *working copy* is a separate draft project in the same database. The frontend makes fine-grained REST edits (add node, move node, set assignment…). Save copies the draft into a named saved project inside one transaction.
+
+```
+Browser (view state only)
+   │  REST: /api/workspace/nodes, /resources, /assignments, /dependencies,
+   │        /calendar, /settings            (CRUD + move/reorder)
+   │  POST /api/workspace/schedule          → recalculates, persists results
+   │  POST /api/workspace/leveling/preview  → preview stored as draft result
+   │  POST /api/workspace/leveling/apply | discard | reset
+   │  POST /api/workspace/save | save-as | load/{id} | new | import-csv
+   │  GET  /api/workspace/state             → dirty flag, staleness, revision
+   ▼
+FastAPI routers ─► Application services (use-cases, transactions)
+                     │            │
+                     │            └─► Repositories (SQLAlchemy Core or sqlite3)
+                     │                  tables: projects, calendars, holidays,
+                     │                  calendar_exceptions, wbs_nodes, resources,
+                     │                  assignments, dependencies,
+                     │                  schedule_runs, node_results,
+                     │                  assignment_results, loading_segments
+                     └─► planner_engine (load aggregate → compute → persist results)
+```
+
+### 3.2 Components
+
+- **Schema:** each project row has `kind ∈ {saved, workspace}`. Each table is keyed by `(project_id, id)` with stable text IDs. Foreign keys (`ON DELETE` rules) and `UNIQUE(task_id, resource_id)` enforce "same person not twice per task" (§5.4) at the DB level. WBS uses `parent_id + sort_order`, and WBS numbers are computed, not stored.
+- **Application services:** one use-case per user action, e.g. `MoveNode`, `DeleteNodePreview` → `DeleteNodeCommit` (§4.1 impact list), `SetAssignment`, `ImportCsv`. Each runs in a single SQLite transaction and bumps the workspace `revision`.
+- **Results:** a `schedule_runs` row stores `kind ∈ {dependency_only, leveling_preview, leveled}` with its fingerprints. Per-node and per-assignment result rows hang off it. Staleness is fingerprint comparison (§1.3).
+- **Dirty tracking:** the workspace stores `based_on_project_id` and `based_on_revision`. "Unsaved changes" means the workspace revision differs from the saved snapshot.
+- **Save / Load / Import:** all are copy operations between project rows inside one transaction. A failure rolls back and leaves the workspace untouched (A09, A11). SQLite WAL mode keeps reads responsive.
+- **Long operations:** scheduling and leveling run in a thread or process pool. Optionally, a small `jobs` table plus a `GET /api/jobs/{id}` endpoint provides progress and busy-state polling (§11.3).
+
+### 3.3 Strengths
+
+- The frontend stays thin. It renders and sends small edit requests, which suits vanilla JS well.
+- Small payloads per edit. Paginated or windowed reads of large WBS (`GET /nodes?offset=&limit=&expanded=`) support "don't render every row at once" (§4.1).
+- Unsaved work survives a browser tab close and even a server restart, because the workspace is on disk.
+- The relational schema enforces integrity (duplicate assignments, dangling references) a second time, and makes CSV export a straightforward query.
+- Deletion-impact previews and validation run server-side with full context.
+
+### 3.4 Weaknesses
+
+- Much larger API surface and mapping code: many endpoints, DTOs, and repository methods. ORM/DTO/engine-model mapping must be kept in sync.
+- Each calculation must load the aggregate from many tables. This is fine for SQLite locally but needs care, e.g. bulk queries rather than N+1.
+- One workspace means one active project per server. That is acceptable, since multi-user editing is out of scope, but two tabs need the revision check.
+- More moving parts to test: the transaction boundaries for each use-case.
+
+### 3.5 Best fit
+
+A conventional, durable design. It scales to large projects, keeps the vanilla-JS frontend simple, and gives the most robust unsaved-work behavior. **This is the recommended default** (see §5).
+
+---
+
+## 4. Architecture C — In-memory domain aggregate with command log and background compute worker
+
+### 4.1 Summary
+
+The backend keeps the **active project as an in-memory aggregate** inside the FastAPI process. All edits are **commands** (`AddNode`, `SetAssignment`, `ShiftCalendarException`, …) applied by a command handler. The handler validates each command, mutates the aggregate, appends an event to an append-only log, and marks the affected results stale through a dependency-aware invalidation graph. Heavy computations run in a separate worker process, report progress, and can be cancelled. SQLite stores snapshots plus the command journal.
+
+```
+Browser
+   │  POST /api/commands  [{type, payload}, ...]  → {revision, changes, staleness}
+   │  POST /api/undo | /api/redo
+   │  GET  /api/project?view=wbs&window=...      → read models (projections)
+   │  POST /api/jobs/schedule | /api/jobs/level  → {job_id}
+   │  GET  /api/jobs/{id}  or  SSE /api/events   → progress, completion, results
+   │  POST /api/save | /api/load/{id} | /api/import-csv
+   ▼
+FastAPI ─► CommandBus ─► ProjectAggregate (in memory, single writer lock)
+              │                │
+              │                ├─► Invalidation graph → marks stale: dates / loading / cost
+              │                └─► Read-model projections (WBS rows, Gantt rows, loading)
+              ├─► Journal (SQLite: commands table, autosave) ──► crash recovery
+              └─► JobRunner (ProcessPoolExecutor) ─► planner_engine
+                                                   (incremental forward pass,
+                                                    leveling with progress callbacks)
+   SQLite: projects(snapshot_json, results_json, saved_at), journal(project_id, seq, command_json)
+```
+
+### 4.2 Components
+
+- **Aggregate and commands:** every change is an explicit command that can be validated and undone. Commands map naturally to actions like "edit that person's existing assignment rather than duplicate" (§5.4). Undo/redo comes almost for free.
+- **Incremental recalculation:** the aggregate knows which inputs changed. A sizing change on task T re-runs the forward pass only for T's downstream closure in topological order. A rate change re-runs only the cost rollup. This makes **immediate recalculation after each valid edit** practical even for large projects (open decision 6).
+- **Jobs:** leveling and full recalculation run as cancellable jobs with progress reporting over Server-Sent Events, which are native to browsers and need no library. This meets "progress or busy state without freezing" (§11.3).
+- **Persistence:** Save writes a snapshot with its results atomically, using write-to-temp-row then swap inside one transaction. The journal autosaves unsaved commands, so a crash can replay them onto the last snapshot. Load restores the snapshot verbatim, with no recalculation (A11).
+- **Preview / apply:** a leveling job produces a preview result attached to the aggregate. `ApplyLeveling` and `DiscardLeveling` are ordinary undoable commands.
+
+### 4.3 Strengths
+
+- The most responsive design for large projects: incremental recalculation, cancellable background jobs, and live progress.
+- Undo/redo and an audit trail of edits are natural extras.
+- The command model gives one clear place for validation and invalidation rules, so the logic isn't spread across many REST handlers.
+- Read-model projections can serve exactly the windowed rows the frontend needs.
+
+### 4.4 Weaknesses
+
+- **Highest complexity:** command bus, event journal, invalidation graph, incremental engine paths, job lifecycle, and SSE. It needs more design and much more testing, including property tests that incremental results equal a full recalculation.
+- State lives in the process. A single-worker Uvicorn setup is mandatory, and correctness depends on the journal and recovery code.
+- Incremental scheduling adds a second code path in the engine, which is a correctness risk. Mitigation: a full-recalc path is always available and used as the test oracle.
+- Over-engineered unless the performance targets (open decision 8) turn out to be demanding.
+
+### 4.5 Best fit
+
+Very large projects, or a firm requirement for immediate recalculation, undo/redo, and live progress. It is also a sensible *evolution* of Architecture B if performance later demands it.
+
+---
+
+## 5. Comparison and recommendation
+
+| Criterion | A — Stateless + documents | B — Server workspace, relational | C — In-memory aggregate + commands |
+|---|---|---|---|
+| Backend complexity | Low | Medium | High |
+| Frontend complexity (vanilla JS) | **High** (owns all state) | Low | Low–Medium |
+| Large-project scalability | Limited (full payload per call) | Good (windowed reads, server-side compute) | Best (incremental, jobs) |
+| Unsaved-work durability | Browser only | On disk (survives restarts) | Journal-based recovery |
+| Save/load exactness (A11) | Trivial | Straightforward (transactional copy) | Straightforward (snapshot) |
+| Failed import/load safety (A09) | Automatic | Transaction rollback | Build new aggregate, then swap |
+| Immediate recalc viable (decision 6) | Only for small projects | Yes for moderate sizes | Yes, incrementally |
+| Undo/redo | Frontend must implement | Not inherent | Native |
+| Testability | Excellent | Good | Good, but needs incremental-vs-full oracle tests |
+| Time to first working version | Shortest | Moderate | Longest |
+
+**Recommendation: Architecture B.** Reuse the shared engine (§1) exactly as specified, with these additions:
+
+- Compute behind a thread/process pool with a simple `jobs` polling endpoint.
+- Fingerprint-based staleness and both dependency-only and leveled schedule runs stored.
+- Keep the engine's `forward_pass` structured so a later incremental variant (Architecture C) can be added without changing the API contract for reads.
+
+B keeps the vanilla-JS frontend thin, makes the spec's save/load/import rollback guarantees easy to prove with SQLite transactions, and handles large WBS views with windowed queries. It also avoids C's complexity until performance targets justify it.
+
+If speed of a first prototype matters most, Architecture A is a valid stepping stone. Its engine and CSV modules carry over unchanged to B.
+
+---
+
+## 6. Suggested backend package layout (applies to B; A and C differ in `app/`)
+
+```
+backend/
+  planner_engine/            # pure, no I/O — identical in A, B, C
+    model.py  calendar.py  validation.py  sizing.py  network.py
+    forward_pass.py  rollup.py  loading.py  cost.py  leveling.py
+    results.py  csv_io.py  fingerprint.py
+  app/
+    main.py                  # FastAPI app, static file mount for frontend
+    api/                     # routers + Pydantic DTOs
+    services/                # use-cases, transaction boundaries
+    persistence/             # schema.sql, migrations, repositories
+    jobs.py                  # executor + job status
+  tests/
+    engine/                  # A01–A21 as named tests, plus Hypothesis property tests
+    api/                     # FastAPI TestClient, rollback/fidelity tests (A09–A11)
+```
+
+Testing strategy (all options):
+
+- Each acceptance scenario A01–A21 becomes a named engine or API test.
+- Property-based tests with Hypothesis check invariants:
+  - every dependency is satisfied after the forward pass and after leveling;
+  - leveling never changes duration, assignments, or cost (A19);
+  - group cost equals the sum of leaf costs (A17);
+  - loading is never capped.
+- A22 is covered by an API test that the static frontend is served without any build step.
+
+---
+
+## 7. How each architecture interacts with the open decisions (§14)
+
+| # | Decision | Impact on architecture choice |
+|---|---|---|
+| 1 | Leveling priority / preview | Engine uses a pluggable priority strategy. Preview/apply is supported by storing separate schedule runs in A, B, and C. |
+| 2 | CSV schema | Isolated in `csv_io`, so it doesn't affect architecture. |
+| 3 | Multiple named projects / Save As | A and B: multiple rows in `projects`. C: multiple snapshots. All support it cheaply. |
+| 4 | Allocation % range | A validation rule only. Leveling's "unresolvable" check uses the 100% cap independently. |
+| 5 | Dependencies on groups | `network` expands group endpoints to leaves if allowed. The schema is unchanged. |
+| 6 | Immediate vs. button recalc | A: button-driven is preferable. B: either works for moderate sizes. C: designed for immediate. |
+| 7 | Precision / boundary display | Axis unit (minutes vs. seconds) and `to_datetime` boundary rule. Localized in `calendar`. |
+| 8 | Performance targets | The main factor between B and C. Define representative sizes, e.g. 1k / 10k / 50k tasks, before committing. |
+| 9 | Currency / rounding | `cost` uses `Decimal` with one rounding policy. Currency is a project field. |
+
+---
+
+## 8. Desktop variant: Tkinter UI instead of a browser
+
+### 8.1 What changes and what stays
+
+| Layer | Web setup (§1–7) | Tkinter desktop setup |
+|---|---|---|
+| UI | Vanilla JS/HTML/CSS in a browser | Tkinter/ttk in a desktop window |
+| UI ↔ backend boundary | HTTP/JSON through FastAPI | **Direct Python calls** into an application-service layer, with no network or serialization |
+| Scheduling engine | `planner_engine` (pure Python) | **Same, unchanged** |
+| Persistence | SQLite | **Same, unchanged** |
+| Long operations | Executor + polling/SSE | Executor + `root.after()` polling on the Tk main thread |
+| Distribution | Python + backend deps, browser opens a local URL | Python (Tkinter ships with the python.org Windows installer), or one PyInstaller executable |
+
+The engine is already independent of the UI and of I/O (§1), so all the scheduling, leveling, cost and CSV logic carries over as is. What changes is the layer above the engine: HTTP routers are replaced by a Python service API that the UI calls directly.
+
+### 8.2 Recommended desktop layering
+
+```
+┌──────────────────────────── Tkinter process ────────────────────────────┐
+│  ui/  (Tk main thread only)                                             │
+│    MainWindow ─ WbsTreeView (ttk.Treeview) ─ GanttCanvas (tk.Canvas)    │
+│               ─ LoadingCanvas ─ PropertiesPanel ─ dialogs (calendar,    │
+│                 resources, dependencies, CSV import summary, save/load) │
+│    Presenters / view-models: turn service DTOs into rows and shapes     │
+│             │  plain Python calls (sync for edits, async for compute)   │
+│             ▼                                                           │
+│  app/services/  ProjectService  (single entry point, UI-agnostic)       │
+│    edits:   add_node, move_node, rename_node, delete_preview/commit,    │
+│             set_sizing, set_assignment, remove_assignment,              │
+│             add/edit/remove_dependency, edit_calendar, edit_resource    │
+│    reads:   wbs_rows(window, expanded_ids), gantt_rows(window),         │
+│             loading(resource_id, range), task_details(id), state()      │
+│    compute: submit_schedule(), submit_leveling_preview() → Job          │
+│             apply_leveling(), discard_leveling(), reset_to_dependency() │
+│    files:   new, save, save_as, load, list_projects, import_csv,        │
+│             export_csv                                                  │
+│    events:  subscribe(callback): dirty/stale/result-ready notices        │
+│             │                         │                                 │
+│             ▼                         ▼                                 │
+│  app/persistence/ (SQLite)      app/jobs.py (ProcessPoolExecutor)       │
+│                                       │                                 │
+│                                       ▼                                 │
+│                              planner_engine (unchanged)                 │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Rules that keep this design clean and keep the web option open:
+
+1. **The UI never imports `planner_engine` or `persistence` directly.** It only talks to `ProjectService` and its DTOs (plain dataclasses).
+2. **`ProjectService` never imports `tkinter`.** It reports changes through a callback interface. The UI layer then moves those notices onto the Tk thread with `root.after(0, ...)`.
+3. Service DTOs are designed so a thin FastAPI router could expose them later without changing the services. This keeps a later return to the browser UI (§2) cheap.
+
+### 8.3 How the three architectures adapt
+
+| Architecture | Desktop form | Assessment |
+|---|---|---|
+| **A — Stateless + documents** | The UI holds the working project in memory and calls `engine.schedule(project)` directly. Save/load stores JSON documents in SQLite. | Viable, and the simplest. Its main web-era advantage, a clean stateless HTTP contract, no longer applies. Dirty tracking, deletion-impact checks and ID generation end up in UI code unless they are moved into a model class, at which point it becomes a light version of C. Unsaved work is lost on a crash. |
+| **B — Workspace in SQLite, normalized** | `ProjectService` works on the workspace project rows. Each edit is a short SQLite transaction, and save/load/import are transactional copies. | **Recommended.** It maps one-to-one onto the service layer above. Unsaved work survives a crash or power loss, the rollback guarantees (A09, A11) come from transactions, and windowed `wbs_rows()` queries suit lazy-loaded Treeview children. |
+| **C — In-memory aggregate + command log** | The aggregate lives in the desktop process, which is a natural fit because the process is long-lived and single-user. Commands give undo/redo (Ctrl+Z/Ctrl+Y). The journal in SQLite handles crash recovery. | Fits the desktop better than the web, since undo/redo is expected in desktop apps and there is no single-worker server constraint. It is still the most complex option. Choose it if immediate recalculation or undo/redo becomes a requirement, or if performance targets demand incremental scheduling. |
+
+**Recommendation for desktop: Architecture B in-process,** with C as a later upgrade path. If undo/redo is required from day one, B can store edit commands in a `journal` table from the start, which is a step toward C without the incremental engine.
+
+### 8.4 Threading and responsiveness (§11.3)
+
+Tkinter is **not thread-safe**. All widget access must happen on the main thread.
+
+- **Edits** (`set_assignment`, `move_node`, …) are short SQLite transactions and run synchronously on the main thread. Each should finish in milliseconds. If profiling shows slow edits on large projects, they can move to the worker as well.
+- **Scheduling and leveling** run in a `ProcessPoolExecutor`. A process avoids the GIL, so the UI stays smooth during heavy calculation.
+  - `submit_*()` returns a `Job` holding a `Future`, a cancel flag, and a `multiprocessing.Queue` for progress messages.
+  - The UI polls with `root.after(100, poll)`, updates a progress bar, and disables actions that conflict with the running job (edit, save).
+  - On completion, the service saves the result with its input fingerprint. If the inputs changed while the job ran, the result is marked stale on arrival and never shown as current (§8, A15).
+- **Inputs passed to the worker** are an immutable `engine.model.Project` snapshot, so nothing is shared between UI state and the worker.
+- **Cancellation:** leveling checks a cancel flag between task placements. If the user cancels, no partial result is applied.
+- Under PyInstaller on Windows, the entry point must call `multiprocessing.freeze_support()`.
+
+### 8.5 Backend capabilities the Tkinter UI will rely on
+
+These are backend obligations that matter more with Tkinter than in a browser:
+
+| UI need | Backend support |
+|---|---|
+| Large WBS without rendering every row (§4.1) | `wbs_rows(parent_id, expanded_ids, offset, limit)`. Treeview children are inserted only when a group is expanded, using a placeholder child to show the expand arrow. |
+| Gantt and loading on `tk.Canvas` without thousands of items | `gantt_rows(row_window, time_window)` and `loading(resource_id, time_window)` return only visible items as precomputed calendar coordinates, so the canvas only maps them to pixels. Loading is returned as piecewise segments from the `loading` sweep-line, not per-minute samples. |
+| Nonworking-date shading on the Gantt (§11.2) | `calendar_nonworking_ranges(time_window)`. |
+| Treeview and Gantt row alignment | Reads return a stable display-row order and an index for each row. The UI uses fixed row heights and one shared vertical scroll. |
+| Deletion impact prompt (§4.1) | `delete_preview(ids)` returns affected descendants and dependencies. `delete_commit(preview_token)` checks that nothing changed in between. |
+| Unsaved-changes prompt on New/Load/Import/window close (§3.2) | `state()` reports `dirty`, `stale_dates`, `stale_costs`, `has_leveling_preview`. The UI hooks `WM_DELETE_WINDOW` to prompt. |
+| Actionable, field-addressed errors (§11.3) | Every validation error carries `object_type`, `object_id` and `field`, so the UI can select the row and focus the field. |
+| Cost transparency in task details (§5.5) | `task_details(id)` returns per-assignment percentage, hours, rate, cost and completeness. |
+
+### 8.6 Packaging and launch (replaces "local launch procedure TBD", §2)
+
+- **Developer run:** `python -m planner` on a standard CPython 3.11+ install. Tkinter is included with the python.org Windows installer.
+- **End-user distribution:** PyInstaller one-folder build, which starts faster than one-file. No Python install is needed on the target laptop.
+- **Data location:** SQLite file in `%APPDATA%\ProjectPlanner\planner.db` by default, with "Open database…" for other locations. Enable WAL mode and an `integrity_check` on startup.
+- **High-DPI:** call `ctypes.windll.shcore.SetProcessDpiAwareness(1)` before creating the root window, and scale canvas metrics by `tk scaling`.
+- **Runtime dependencies:** standard library only (`tkinter`, `sqlite3`, `decimal`, `csv`, `concurrent.futures`). Pydantic and FastAPI are dropped. Test-only dependencies: `pytest`, `hypothesis`.
+
+### 8.7 Package layout (desktop, Architecture B)
+
+```
+planner/
+  __main__.py                # DPI setup, freeze_support(), launches ui.app
+  planner_engine/            # unchanged from §6
+  app/
+    services/                # ProjectService, DTOs, events, delete-preview tokens
+    persistence/             # schema.sql, migrations, repositories (sqlite3)
+    jobs.py                  # ProcessPoolExecutor, Job, progress queue, cancel
+  ui/                        # the only package importing tkinter
+    app.py  main_window.py  wbs_tree.py  gantt_canvas.py  loading_canvas.py
+    properties_panel.py  dialogs/  presenters/
+  # optional later: web/ (FastAPI routers over app.services, static frontend)
+tests/
+  engine/                    # A01–A21, Hypothesis properties (unchanged)
+  services/                  # rollback, fidelity, staleness, delete-preview (A09–A15)
+  ui/                        # thin smoke tests: window builds, presenters map DTOs correctly
+```
+
+Testing note: almost all behavior is tested below the UI, through `ProjectService`. UI tests check only presenters (DTO → rows/shapes) and a headless window-creation smoke test.
+
+### 8.8 Trade-offs of the desktop choice
+
+**Gains:**
+- One language and one process.
+- No HTTP layer, DTO serialization or JavaScript state management.
+- Simpler installation and launch.
+- Native file dialogs for CSV import/export.
+- No browser compatibility concerns.
+
+**Costs:**
+- Gantt and loading charts must be hand-drawn on `tk.Canvas`.
+- `ttk.Treeview` has no in-cell editing, so it needs overlaid Entry/Combobox widgets or a properties panel.
+- Synchronized scrolling between table and Gantt takes custom work.
+- The look is plainer than HTML/SVG.
+- A later web UI would need the FastAPI layer re-added. The service-boundary rules in §8.2 keep that cheap.
+
+---
+
+## 9. Draft spec amendments for a Tkinter UI
+
+These edits were approved and applied to `Project_Planner_Functional_Specification.md` in v1.3 draft (2026-10-01).
+
+**§2 table, replace the first two rows with:**
+
+| Layer | Technology | Responsibility |
+|---|---|---|
+| Desktop interface | Python Tkinter/ttk | Editing, Gantt display, resource charts, project actions |
+| Application services | Python modules | Validate requests and coordinate project operations |
+
+**§2 paragraph, replace with:**
+
+> The application shall run locally as a desktop application with a Tkinter user interface. It shall require only a standard Python installation or a packaged executable, and no web browser, web server, Node.js, npm, or frontend build step. The Gantt and resource charts shall be implemented with native Tkinter widgets (Canvas). The user interface shall call scheduling and persistence functions through an application-service layer and shall not contain scheduling rules. Scheduling rules shall reside in independent Python modules that do not depend on the user interface. Long-running operations shall not block the interface. Public hosting, authentication, and simultaneous multi-user editing are outside the initial scope.
+
+**§1:** replace "browser-based" with "desktop".
+
+**§11 title:** "Browser interface" → "User interface". In §11.3, add: "Closing the application window shall offer the same save/discard opportunity as loading another project."
+
+**§14 Outside the initial scope:** add "Browser-based interface (a later version may add one over the same application-service layer)."
+
+**A22, replace with:**
+
+| ID | Scenario | Expected behavior |
+|---|---|---|
+| A22 | Launch on a Windows laptop with a standard Python installation, or from the packaged executable | Application window opens without installing Node.js, npm, a browser, or any frontend build step |
+
+**New acceptance scenario:**
+
+| ID | Scenario | Expected behavior |
+|---|---|---|
+| A23 | Leveling or scheduling a large project | Interface stays responsive, shows progress, and permits cancellation; a cancelled run applies no partial result |

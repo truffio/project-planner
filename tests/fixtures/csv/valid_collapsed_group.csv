@@ -1,0 +1,12 @@
+record_type,schema_version,id,name,start_date,currency,cost_report_unit,hours_per_day,working_days_per_year,working_weekdays,workday_start,date,exception_kind,hourly_rate,node_kind,parent_id,sibling_order,sizing_mode,sizing_value,sizing_unit,task_id,resource_id,percent,pred_id,succ_id,dep_type,lag_value,lag_unit,schedule_status,schedule_kind,start,finish,working_span_days,elapsed_span_calendar_days,duration_days,effort_days,leveling_delay_days,assignment_days,work_qty,work_unit,rate_per_unit,cost,cost_complete,node_status,issue_codes
+PROJECT,1,,Collapsed group example,2026-03-02,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+CALENDAR,1,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+NODE,1,G1,Phase 1,,,,,,,,,,,group,,1,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+NODE,1,G2,Work package,,,,,,,,,,,group,G1,1,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+NODE,1,G3,Activity,,,,,,,,,,,group,G2,1,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+NODE,1,G4,Sub-activity,,,,,,,,,,,group,G3,1,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+NODE,1,L1,Deep task A,,,,,,,,,,,task,G4,1,duration,2,d,,,,,,,,,,,,,,,,,,,,,,,,,
+NODE,1,L2,Deep task B,,,,,,,,,,,task,G4,2,effort,8,h,,,,,,,,,,,,,,,,,,,,,,,,,
+NODE,1,L3,Deep milestone,,,,,,,,,,,milestone,G4,3,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+NODE,1,L4,Shallow task,,,,,,,,,,,task,G2,2,duration,1,d,,,,,,,,,,,,,,,,,,,,,,,,,
+NODE,1,T9,Top-level task,,,,,,,,,,,task,,2,duration,3,d,,,,,,,,,,,,,,,,,,,,,,,,,

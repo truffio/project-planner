@@ -1,0 +1,2 @@
+# CSV fixtures are byte-exact test inputs (BOM, CRLF/LF variants): never normalise line endings
+tests/fixtures/csv/*.csv -text

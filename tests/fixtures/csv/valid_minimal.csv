@@ -1,0 +1,4 @@
+record_type,schema_version,id,name,start_date,currency,cost_report_unit,hours_per_day,working_days_per_year,working_weekdays,workday_start,date,exception_kind,hourly_rate,node_kind,parent_id,sibling_order,sizing_mode,sizing_value,sizing_unit,task_id,resource_id,percent,pred_id,succ_id,dep_type,lag_value,lag_unit,schedule_status,schedule_kind,start,finish,working_span_days,elapsed_span_calendar_days,duration_days,effort_days,leveling_delay_days,assignment_days,work_qty,work_unit,rate_per_unit,cost,cost_complete,node_status,issue_codes
+PROJECT,1,,Sample,2026-03-02,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+CALENDAR,1,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+NODE,1,T1,Only task,,,,,,,,,,,task,,1,duration,5,d,,,,,,,,,,,,,,,,,,,,,,,,,

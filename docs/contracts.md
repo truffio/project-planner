@@ -47,3 +47,12 @@ Reference listing for Wave 1+ agents. The code in `src/project_planner/engine/{m
 - `migrations.migrate(conn) -> int`, `schema_version(conn)`, `LATEST_VERSION = 1`.
 - `repositories` (conn first): `create_project(project, kind, name=None, *, saved_at=None) -> pk`, `create_workspace(project) -> pk`, `get_workspace_pk() -> pk | None`, `get_project_record(pk) -> ProjectRecord`, `bump_revision(pk) -> int`, `list_saved_projects() -> [(pk, name, saved_at)]` newest first, `delete_saved_project(pk)`, `save_project(pk, project)` (does not touch revision/runs), `load_project(pk) -> Project`, `copy_project(src_pk, dst_pk=None, *, kind, name, saved_at=None) -> pk` (overwriting a destination bumps its revision), `save_run(project_pk, run, nodes, assignments, segments, issues) -> run_pk`, `load_runs(project_pk, kind=None) -> list[RunBundle]`, `delete_runs(project_pk, kind=None) -> int`.
 - `records`: `RunKind`, `ProjectRecord`, `ScheduleRunRecord`, `NodeResultRecord`, `AssignmentResultRecord`, `LoadingSegmentRecord`, `RunBundle(run, nodes, assignments, segments, issues)`. Minutes as int, Decimals as exact TEXT; `projects.name` = library name (saved-name uniqueness), `project_name` = `Project.name`.
+
+## engine.forward_pass (T15)
+`NodeTiming(node_id, start: int | None, finish: int | None, status: "scheduled"|"unschedulable"|"blocked", reason: str | None, blocked_by: tuple[str, ...] = ())`. `forward_pass(project, sizing, *, minutes_per_day, order=None, min_starts=None) -> dict[str, NodeTiming]` — requires a project that passed `ensure_valid`; `start = max(0, min_starts[id], FS pf+lag, SS ps+lag, FF pf+lag−D, SF ps+lag−D)`; blocked check precedes own-sizing check; nested reason chains.
+
+## engine.rollup (T16)
+`GroupSummary(group_id, start, finish, effort_person_minutes, complete, unscheduled_descendants)`; `rollup(project, intervals: Mapping[id, (start, finish) | None], effort: Mapping[id, Decimal | None]) -> dict[group_id, GroupSummary]` (incomplete groups still show partial dates); `wbs_numbers(project) -> dict[id, "1.2.3"]`.
+
+## engine.loading (T17)
+`LoadSegment(resource_id, start, end, percent, task_ids)` (`.overloaded` = percent > 100), `LoadBucket(resource_id, period_start, assigned_person_minutes, assigned_days, average_percent, peak_percent)`. `compute_loading(project, intervals) -> dict[resource_id, tuple[LoadSegment, ...]]` (every resource present), `overloads(loading) -> list[LoadSegment]`, `aggregate(segments, axis, "day"|"week") -> tuple[LoadBucket, ...]` (buckets only for loaded periods).
